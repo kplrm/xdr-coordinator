@@ -233,7 +233,13 @@ function buildIndexTemplate() {
                   start_time:        { type: 'long' },
                   // ── Session / terminal ────────────────────────────────
                   session_id: { type: 'integer' },
-                  tty:        { type: 'integer' },
+                  // tty is an ECS object: { nr: int, name: keyword }
+                  tty: {
+                    properties: {
+                      nr:   { type: 'integer' },
+                      name: { type: 'keyword' },
+                    },
+                  },
                   // ── CPU % ─────────────────────────────────────────────
                   cpu: {
                     properties: {
@@ -445,6 +451,75 @@ function buildIndexTemplate() {
                 properties: {
                   action:  { type: 'keyword' },
                   outcome: { type: 'keyword' },
+                },
+              },
+              // ── ECS dll fields (library load events) ──────────────────────
+              // Emitted by SoLoadCollector (internal/telemetry/library/soload.go).
+              dll: {
+                properties: {
+                  name: { type: 'keyword' },
+                  path: { type: 'keyword' },
+                  hash: {
+                    properties: {
+                      sha256: { type: 'keyword' },
+                    },
+                  },
+                  size: { type: 'long' },
+                },
+              },
+              // ── ECS driver fields (kernel module events) ───────────────────
+              // Emitted by KernelModuleCollector (internal/telemetry/kernel/modules.go).
+              driver: {
+                properties: {
+                  name: { type: 'keyword' },
+                },
+              },
+              // ── XDR agent-extended sub-objects ────────────────────────────
+              // Fields that have no ECS home live under payload.xdr.*
+              xdr: {
+                properties: {
+                  // Kernel module detail (internal/telemetry/kernel/modules.go)
+                  kernel_module: {
+                    properties: {
+                      name:      { type: 'keyword' },
+                      size:      { type: 'long' },
+                      ref_count: { type: 'integer' },
+                      deps:      { type: 'keyword' },
+                      state:     { type: 'keyword' },   // Live | Loading | Unloading
+                      address:   { type: 'keyword' },
+                    },
+                  },
+                  // Scheduled task / cron change events (internal/telemetry/scheduled/tasks.go)
+                  scheduled_task: {
+                    properties: {
+                      path:             { type: 'keyword' },
+                      type:             { type: 'keyword' },   // cron | anacron | at | systemd-timer | …
+                      raw_content:      { type: 'keyword', index: false },
+                      previous_content: { type: 'keyword', index: false },
+                      entries:          { type: 'object',  dynamic: true },
+                    },
+                  },
+                  // Process injection indicators (internal/telemetry/injection/monitor.go)
+                  injection: {
+                    properties: {
+                      indicator: { type: 'keyword' },
+                      detail:    { type: 'keyword' },
+                      target: {
+                        properties: {
+                          pid:  { type: 'integer' },
+                          name: { type: 'keyword' },
+                          exe:  { type: 'keyword' },
+                        },
+                      },
+                      tracer: {
+                        properties: {
+                          pid:  { type: 'integer' },
+                          name: { type: 'keyword' },
+                          exe:  { type: 'keyword' },
+                        },
+                      },
+                    },
+                  },
                 },
               },
             },

@@ -1,10 +1,17 @@
 /*
- * Installs pre-built index-patterns, visualizations, and FOUR dashboards
+ * Installs pre-built index-patterns, visualizations, and eleven dashboards
  * for XDR Agent Telemetry, organised into tab-like views:
- *   - Host    — system CPU & memory metrics
- *   - Process  — per-process CPU usage
- *   - Network  — connection events, protocol/state distribution
- *   - Files    — File Integrity Monitoring (FIM) events, actions, top paths
+ *   - Host      — system CPU & memory metrics
+ *   - Process   — per-process CPU usage and lifecycle
+ *   - Network   — connection events, protocol/state distribution
+ *   - Files     — File Integrity Monitoring (FIM) events, actions, top paths
+ *   - DNS       — query types, response codes, top queried domains
+ *   - Sessions  — authentication, SSH, sudo, privilege escalation
+ *   - Libraries — shared library (SO) load events, unusual paths
+ *   - Kernel    — kernel module load/unload events, module states
+ *   - TTY       — terminal (TTY/PTY) session start/end events
+ *   - Scheduled — cron/anacron/at/systemd-timer change events
+ *   - Injection — process injection / ptrace alert events
  *
  * Each dashboard carries a markdown "navigation bar" panel at the top whose
  * links point at the other dashboards, giving users a tab-switching UX
@@ -106,6 +113,58 @@ const VIS_SESSION_SUDO         = 'xdr-tel-vis-session-sudo';
 const VIS_SESSION_TIMELINE     = 'xdr-tel-vis-session-timeline';
 const VIS_SESSION_SRC_IPS      = 'xdr-tel-vis-session-src-ips';
 const VIS_SESSION_SUDO_TARGETS = 'xdr-tel-vis-session-sudo-targets';
+
+// Library / SO-load visualizations
+const DASH_LIBRARY              = 'xdr-agent-telemetry-library';
+const NAV_LIBRARY               = 'xdr-tel-nav-library';
+const VIS_LIB_EVENTS            = 'xdr-tel-vis-lib-events';
+const VIS_LIB_UNIQUE            = 'xdr-tel-vis-lib-unique';
+const VIS_LIB_UNIQUE_PROCS      = 'xdr-tel-vis-lib-unique-procs';
+const VIS_LIB_NAME_PIE          = 'xdr-tel-vis-lib-name-pie';
+const VIS_LIB_PROC_PIE          = 'xdr-tel-vis-lib-proc-pie';
+const VIS_LIB_TIMELINE          = 'xdr-tel-vis-lib-timeline';
+const VIS_LIB_TOP_PATHS         = 'xdr-tel-vis-lib-top-paths';
+
+// Kernel module visualizations
+const DASH_KERNEL               = 'xdr-agent-telemetry-kernel';
+const NAV_KERNEL                = 'xdr-tel-nav-kernel';
+const VIS_KERN_EVENTS           = 'xdr-tel-vis-kern-events';
+const VIS_KERN_UNIQUE           = 'xdr-tel-vis-kern-unique';
+const VIS_KERN_STATE_PIE        = 'xdr-tel-vis-kern-state-pie';
+const VIS_KERN_ACTION_PIE       = 'xdr-tel-vis-kern-action-pie';
+const VIS_KERN_TOP_MODULES      = 'xdr-tel-vis-kern-top-modules';
+const VIS_KERN_TIMELINE         = 'xdr-tel-vis-kern-timeline';
+
+// TTY session visualizations
+const DASH_TTY                  = 'xdr-agent-telemetry-tty';
+const NAV_TTY                   = 'xdr-tel-nav-tty';
+const VIS_TTY_EVENTS            = 'xdr-tel-vis-tty-events';
+const VIS_TTY_SESSIONS          = 'xdr-tel-vis-tty-sessions';
+const VIS_TTY_PROC_PIE          = 'xdr-tel-vis-tty-proc-pie';
+const VIS_TTY_NAME_PIE          = 'xdr-tel-vis-tty-name-pie';
+const VIS_TTY_TOP_PROCS         = 'xdr-tel-vis-tty-top-procs';
+const VIS_TTY_TIMELINE          = 'xdr-tel-vis-tty-timeline';
+
+// Scheduled task visualizations
+const DASH_SCHEDULED            = 'xdr-agent-telemetry-scheduled';
+const NAV_SCHEDULED             = 'xdr-tel-nav-scheduled';
+const VIS_SCHED_EVENTS          = 'xdr-tel-vis-sched-events';
+const VIS_SCHED_UNIQUE_FILES    = 'xdr-tel-vis-sched-unique-files';
+const VIS_SCHED_TYPE_PIE        = 'xdr-tel-vis-sched-type-pie';
+const VIS_SCHED_ACTION_PIE      = 'xdr-tel-vis-sched-action-pie';
+const VIS_SCHED_TOP_FILES       = 'xdr-tel-vis-sched-top-files';
+const VIS_SCHED_TIMELINE        = 'xdr-tel-vis-sched-timeline';
+
+// Injection / ptrace alert visualizations
+const DASH_INJECTION            = 'xdr-agent-telemetry-injection';
+const NAV_INJECTION             = 'xdr-tel-nav-injection';
+const VIS_INJ_ALERTS            = 'xdr-tel-vis-inj-alerts';
+const VIS_INJ_UNIQUE_TARGETS    = 'xdr-tel-vis-inj-unique-targets';
+const VIS_INJ_UNIQUE_INDICATORS = 'xdr-tel-vis-inj-unique-indicators';
+const VIS_INJ_INDICATOR_PIE     = 'xdr-tel-vis-inj-indicator-pie';
+const VIS_INJ_TOP_TARGETS       = 'xdr-tel-vis-inj-top-targets';
+const VIS_INJ_TOP_TRACERS       = 'xdr-tel-vis-inj-top-tracers';
+const VIS_INJ_TIMELINE          = 'xdr-tel-vis-inj-timeline';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const ss = (query = '') =>
@@ -487,14 +546,19 @@ function dashboard(
 }
 
 // ── Markdown tab navigation ─────────────────────────────────────────────────
-const navMd = (active: 'host' | 'process' | 'network' | 'file' | 'dns' | 'session') => {
-  const hostLabel    = active === 'host'    ? '**▸ Host**'      : `[Host](/app/dashboards#/view/${DASH_HOST})`;
-  const procLabel    = active === 'process' ? '**▸ Processes**' : `[Processes](/app/dashboards#/view/${DASH_PROCESS})`;
-  const netLabel     = active === 'network' ? '**▸ Network**'   : `[Network](/app/dashboards#/view/${DASH_NETWORK})`;
-  const fileLabel    = active === 'file'    ? '**▸ Files**'     : `[Files](/app/dashboards#/view/${DASH_FILE})`;
-  const dnsLabel     = active === 'dns'     ? '**▸ DNS**'       : `[DNS](/app/dashboards#/view/${DASH_DNS})`;
-  const sessionLabel = active === 'session' ? '**▸ Sessions**'  : `[Sessions](/app/dashboards#/view/${DASH_SESSION})`;
-  return `### XDR Agent Telemetry\n${hostLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${procLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${netLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${fileLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${dnsLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${sessionLabel}`;
+const navMd = (active: 'host' | 'process' | 'network' | 'file' | 'dns' | 'session' | 'library' | 'kernel' | 'tty' | 'scheduled' | 'injection') => {
+  const hostLabel      = active === 'host'      ? '**▸ Host**'       : `[Host](/app/dashboards#/view/${DASH_HOST})`;
+  const procLabel      = active === 'process'   ? '**▸ Processes**'  : `[Processes](/app/dashboards#/view/${DASH_PROCESS})`;
+  const netLabel       = active === 'network'   ? '**▸ Network**'    : `[Network](/app/dashboards#/view/${DASH_NETWORK})`;
+  const fileLabel      = active === 'file'      ? '**▸ Files**'      : `[Files](/app/dashboards#/view/${DASH_FILE})`;
+  const dnsLabel       = active === 'dns'       ? '**▸ DNS**'        : `[DNS](/app/dashboards#/view/${DASH_DNS})`;
+  const sessionLabel   = active === 'session'   ? '**▸ Sessions**'   : `[Sessions](/app/dashboards#/view/${DASH_SESSION})`;
+  const libraryLabel   = active === 'library'   ? '**▸ Libraries**'  : `[Libraries](/app/dashboards#/view/${DASH_LIBRARY})`;
+  const kernelLabel    = active === 'kernel'    ? '**▸ Kernel**'     : `[Kernel](/app/dashboards#/view/${DASH_KERNEL})`;
+  const ttyLabel       = active === 'tty'       ? '**▸ TTY**'        : `[TTY](/app/dashboards#/view/${DASH_TTY})`;
+  const scheduledLabel = active === 'scheduled' ? '**▸ Scheduled**'  : `[Scheduled](/app/dashboards#/view/${DASH_SCHEDULED})`;
+  const injectionLabel = active === 'injection' ? '**▸ Injection**'  : `[Injection](/app/dashboards#/view/${DASH_INJECTION})`;
+  return `### XDR Agent Telemetry\n${hostLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${procLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${netLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${fileLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${dnsLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${sessionLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${libraryLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${kernelLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${ttyLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${scheduledLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${injectionLabel}`;
 };
 
 function buildSavedObjects() {
@@ -534,6 +598,26 @@ function buildSavedObjects() {
   const navSession = vis(NAV_SESSION, '[XDR] Nav — Sessions',
     'Tab navigation (Sessions active)',
     markdownVis('[XDR] Nav — Sessions', navMd('session')));
+
+  const navLibrary = vis(NAV_LIBRARY, '[XDR] Nav — Libraries',
+    'Tab navigation (Libraries active)',
+    markdownVis('[XDR] Nav — Libraries', navMd('library')));
+
+  const navKernel = vis(NAV_KERNEL, '[XDR] Nav — Kernel',
+    'Tab navigation (Kernel active)',
+    markdownVis('[XDR] Nav — Kernel', navMd('kernel')));
+
+  const navTty = vis(NAV_TTY, '[XDR] Nav — TTY',
+    'Tab navigation (TTY active)',
+    markdownVis('[XDR] Nav — TTY', navMd('tty')));
+
+  const navScheduled = vis(NAV_SCHEDULED, '[XDR] Nav — Scheduled',
+    'Tab navigation (Scheduled active)',
+    markdownVis('[XDR] Nav — Scheduled', navMd('scheduled')));
+
+  const navInjection = vis(NAV_INJECTION, '[XDR] Nav — Injection',
+    'Tab navigation (Injection active)',
+    markdownVis('[XDR] Nav — Injection', navMd('injection')));
 
   // ═══════════════════════════════════════════════════════════════════════════
   // HOST visualizations
@@ -1207,11 +1291,341 @@ function buildSavedObjects() {
       { name: 'panel_10', id: VIS_SESSION_SUDO_TARGETS   },
     ]);
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LIBRARY / SO-LOAD visualizations
+  // event.category: "library"
+  // payload.dll.{name, path, hash.sha256, size}, payload.process.name
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const visLibEvents = vis(VIS_LIB_EVENTS,
+    '[XDR] Library Load Events', 'Total count of shared library / SO load events',
+    metricVis('[XDR] Library Load Events', null, 'count', 'Load Events'),
+    'event.category: "library"');
+
+  const visLibUnique = vis(VIS_LIB_UNIQUE,
+    '[XDR] Unique Libraries', 'Distinct shared libraries loaded in the selected time range',
+    metricVis('[XDR] Unique Libraries', 'payload.dll.name', 'cardinality', 'Unique Libraries'),
+    'event.category: "library"');
+
+  const visLibUniqueProcs = vis(VIS_LIB_UNIQUE_PROCS,
+    '[XDR] Unique Loader Processes', 'Distinct processes that loaded at least one shared library',
+    metricVis('[XDR] Unique Loader Processes', 'payload.process.name', 'cardinality', 'Unique Processes'),
+    'event.category: "library"');
+
+  const visLibNamePie = vis(VIS_LIB_NAME_PIE,
+    '[XDR] Top Loaded Libraries', 'Most frequently loaded shared libraries by name — unusual or unsigned libraries warrant investigation',
+    pieVis('[XDR] Top Loaded Libraries', 'payload.dll.name', 'Library', 15),
+    'event.category: "library"');
+
+  const visLibProcPie = vis(VIS_LIB_PROC_PIE,
+    '[XDR] Top Loader Processes', 'Which processes are loading the most shared libraries',
+    pieVis('[XDR] Top Loader Processes', 'payload.process.name', 'Process', 15),
+    'event.category: "library"');
+
+  const visLibTimeline = vis(VIS_LIB_TIMELINE,
+    '[XDR] Library Load Events Over Time', 'Shared library load events over time',
+    countAreaVis('[XDR] Library Load Events Over Time', 'Load Events'),
+    'event.category: "library"');
+
+  const visLibTopPaths = vis(VIS_LIB_TOP_PATHS,
+    '[XDR] Top Library Paths', 'Top 20 library file paths — paths outside /usr/lib or /lib may indicate side-loading or injection',
+    topNTermsCountBarVis('[XDR] Top Library Paths', 'payload.dll.path', 'Path', 20),
+    'event.category: "library"');
+
+  // ── Library Dashboard ─────────────────────────────────────────────────────
+  // Layout (48 cols):
+  //   Row  0: nav (48, 5)
+  //   Row  5: lib-events (16, 8) | unique-libs (16, 8) | unique-procs (16, 8)
+  //   Row 13: name-pie (24, 16) | proc-pie (24, 16)
+  //   Row 29: timeline (48, 14)
+  //   Row 43: top-paths (48, 16)
+
+  const dashLibrary = dashboard(DASH_LIBRARY, 'XDR Telemetry — Libraries',
+    'Shared library and SO load monitoring: top loaded libraries, loader processes, unusual paths, and load event timeline.', [
+      { x: 0,  y: 0,  w: 48, h: 5,  ref: 'panel_0' },
+      { x: 0,  y: 5,  w: 16, h: 8,  ref: 'panel_1' },
+      { x: 16, y: 5,  w: 16, h: 8,  ref: 'panel_2' },
+      { x: 32, y: 5,  w: 16, h: 8,  ref: 'panel_3' },
+      { x: 0,  y: 13, w: 24, h: 16, ref: 'panel_4' },
+      { x: 24, y: 13, w: 24, h: 16, ref: 'panel_5' },
+      { x: 0,  y: 29, w: 48, h: 14, ref: 'panel_6' },
+      { x: 0,  y: 43, w: 48, h: 16, ref: 'panel_7' },
+    ], [
+      { name: 'panel_0', id: NAV_LIBRARY        },
+      { name: 'panel_1', id: VIS_LIB_EVENTS     },
+      { name: 'panel_2', id: VIS_LIB_UNIQUE      },
+      { name: 'panel_3', id: VIS_LIB_UNIQUE_PROCS },
+      { name: 'panel_4', id: VIS_LIB_NAME_PIE   },
+      { name: 'panel_5', id: VIS_LIB_PROC_PIE   },
+      { name: 'panel_6', id: VIS_LIB_TIMELINE   },
+      { name: 'panel_7', id: VIS_LIB_TOP_PATHS  },
+    ]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // KERNEL MODULE visualizations
+  // event.category: "driver"
+  // payload.driver.name, payload.xdr.kernel_module.{name,state,size,ref_count,deps,address}
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const visKernEvents = vis(VIS_KERN_EVENTS,
+    '[XDR] Kernel Module Events', 'Total count of kernel module load / unload events',
+    metricVis('[XDR] Kernel Module Events', null, 'count', 'Module Events'),
+    'event.category: "driver"');
+
+  const visKernUnique = vis(VIS_KERN_UNIQUE,
+    '[XDR] Unique Modules', 'Distinct kernel module names observed in the selected time range',
+    metricVis('[XDR] Unique Modules', 'payload.xdr.kernel_module.name', 'cardinality', 'Unique Modules'),
+    'event.category: "driver"');
+
+  const visKernStatePie = vis(VIS_KERN_STATE_PIE,
+    '[XDR] Module State Distribution', 'Kernel module state breakdown: Live, Loading, Unloading',
+    pieVis('[XDR] Module State Distribution', 'payload.xdr.kernel_module.state', 'State', 5),
+    'event.category: "driver"');
+
+  const visKernActionPie = vis(VIS_KERN_ACTION_PIE,
+    '[XDR] Module Event Actions', 'Distribution of kernel module event actions: insmod vs rmmod',
+    pieVis('[XDR] Module Event Actions', 'event.action', 'Action', 5),
+    'event.category: "driver"');
+
+  const visKernTopModules = vis(VIS_KERN_TOP_MODULES,
+    '[XDR] Top Kernel Modules', 'Most frequently observed kernel modules — unexpected or unsigned modules warrant investigation',
+    topNTermsCountBarVis('[XDR] Top Kernel Modules', 'payload.xdr.kernel_module.name', 'Module', 20),
+    'event.category: "driver"');
+
+  const visKernTimeline = vis(VIS_KERN_TIMELINE,
+    '[XDR] Kernel Module Events Over Time', 'Kernel module load and unload event volume over time, stacked by action',
+    countAreaGroupVis('[XDR] Kernel Module Events Over Time', 'event.action', 'Action', 'Events'),
+    'event.category: "driver"');
+
+  // ── Kernel Module Dashboard ───────────────────────────────────────────────
+  // Layout (48 cols):
+  //   Row  0: nav (48, 5)
+  //   Row  5: kern-events (24, 8) | unique-modules (24, 8)
+  //   Row 13: state-pie (24, 16) | action-pie (24, 16)
+  //   Row 29: timeline (48, 14)
+  //   Row 43: top-modules (48, 16)
+
+  const dashKernel = dashboard(DASH_KERNEL, 'XDR Telemetry — Kernel Modules',
+    'Kernel module load / unload monitoring: module states, event actions, top modules, and event timeline.', [
+      { x: 0,  y: 0,  w: 48, h: 5,  ref: 'panel_0' },
+      { x: 0,  y: 5,  w: 24, h: 8,  ref: 'panel_1' },
+      { x: 24, y: 5,  w: 24, h: 8,  ref: 'panel_2' },
+      { x: 0,  y: 13, w: 24, h: 16, ref: 'panel_3' },
+      { x: 24, y: 13, w: 24, h: 16, ref: 'panel_4' },
+      { x: 0,  y: 29, w: 48, h: 14, ref: 'panel_5' },
+      { x: 0,  y: 43, w: 48, h: 16, ref: 'panel_6' },
+    ], [
+      { name: 'panel_0', id: NAV_KERNEL           },
+      { name: 'panel_1', id: VIS_KERN_EVENTS       },
+      { name: 'panel_2', id: VIS_KERN_UNIQUE        },
+      { name: 'panel_3', id: VIS_KERN_STATE_PIE    },
+      { name: 'panel_4', id: VIS_KERN_ACTION_PIE   },
+      { name: 'panel_5', id: VIS_KERN_TIMELINE     },
+      { name: 'panel_6', id: VIS_KERN_TOP_MODULES  },
+    ]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TTY SESSION visualizations
+  // event.module: "telemetry.tty" (event.category: "process")
+  // payload.process.{pid, name, executable, tty.{nr,name}, session_id}
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const visTtyEvents = vis(VIS_TTY_EVENTS,
+    '[XDR] TTY Events', 'Total count of TTY session start and end events',
+    metricVis('[XDR] TTY Events', null, 'count', 'TTY Events'),
+    'event.module: "telemetry.tty"');
+
+  const visTtySessions = vis(VIS_TTY_SESSIONS,
+    '[XDR] Unique TTY Sessions', 'Distinct processes observed with a controlling terminal',
+    metricVis('[XDR] Unique TTY Sessions', 'payload.process.pid', 'cardinality', 'Unique Sessions'),
+    'event.module: "telemetry.tty"');
+
+  const visTtyProcPie = vis(VIS_TTY_PROC_PIE,
+    '[XDR] Top TTY Processes', 'Which processes are most commonly associated with terminal sessions',
+    pieVis('[XDR] Top TTY Processes', 'payload.process.name', 'Process', 15),
+    'event.module: "telemetry.tty"');
+
+  const visTtyNamePie = vis(VIS_TTY_NAME_PIE,
+    '[XDR] TTY Name Distribution', 'Distribution of terminal device names (pts/0, pts/1 …)',
+    pieVis('[XDR] TTY Name Distribution', 'payload.process.tty.name', 'TTY Name', 15),
+    'event.module: "telemetry.tty"');
+
+  const visTtyTopProcs = vis(VIS_TTY_TOP_PROCS,
+    '[XDR] Top Processes Starting TTY Sessions', 'Top 20 processes that most frequently start terminal sessions',
+    topNTermsCountBarVis('[XDR] Top Processes Starting TTY Sessions', 'payload.process.name', 'Process', 20),
+    'event.module: "telemetry.tty" and event.action: "tty.session_start"');
+
+  const visTtyTimeline = vis(VIS_TTY_TIMELINE,
+    '[XDR] TTY Events Over Time', 'TTY session start and end events over time, stacked by action',
+    countAreaGroupVis('[XDR] TTY Events Over Time', 'event.action', 'Action', 'Events'),
+    'event.module: "telemetry.tty"');
+
+  // ── TTY Dashboard ─────────────────────────────────────────────────────────
+  // Layout (48 cols):
+  //   Row  0: nav (48, 5)
+  //   Row  5: tty-events (24, 8) | unique-sessions (24, 8)
+  //   Row 13: proc-pie (24, 16) | name-pie (24, 16)
+  //   Row 29: timeline (48, 14)
+  //   Row 43: top-procs (48, 16)
+
+  const dashTty = dashboard(DASH_TTY, 'XDR Telemetry — TTY Sessions',
+    'Terminal (TTY/PTY) session monitoring: processes with terminals, TTY device distribution, session start/end timeline.', [
+      { x: 0,  y: 0,  w: 48, h: 5,  ref: 'panel_0' },
+      { x: 0,  y: 5,  w: 24, h: 8,  ref: 'panel_1' },
+      { x: 24, y: 5,  w: 24, h: 8,  ref: 'panel_2' },
+      { x: 0,  y: 13, w: 24, h: 16, ref: 'panel_3' },
+      { x: 24, y: 13, w: 24, h: 16, ref: 'panel_4' },
+      { x: 0,  y: 29, w: 48, h: 14, ref: 'panel_5' },
+      { x: 0,  y: 43, w: 48, h: 16, ref: 'panel_6' },
+    ], [
+      { name: 'panel_0', id: NAV_TTY          },
+      { name: 'panel_1', id: VIS_TTY_EVENTS   },
+      { name: 'panel_2', id: VIS_TTY_SESSIONS },
+      { name: 'panel_3', id: VIS_TTY_PROC_PIE },
+      { name: 'panel_4', id: VIS_TTY_NAME_PIE },
+      { name: 'panel_5', id: VIS_TTY_TIMELINE },
+      { name: 'panel_6', id: VIS_TTY_TOP_PROCS },
+    ]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SCHEDULED TASK visualizations
+  // event.category: "configuration"
+  // payload.file.path, payload.xdr.scheduled_task.{path,type,entries}
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const visSchedEvents = vis(VIS_SCHED_EVENTS,
+    '[XDR] Scheduled Task Events', 'Total count of scheduled task change events (cron, anacron, at, systemd-timer)',
+    metricVis('[XDR] Scheduled Task Events', null, 'count', 'Task Events'),
+    'event.category: "configuration"');
+
+  const visSchedUniqueFiles = vis(VIS_SCHED_UNIQUE_FILES,
+    '[XDR] Unique Task Files', 'Distinct scheduled task configuration files observed changing',
+    metricVis('[XDR] Unique Task Files', 'payload.xdr.scheduled_task.path', 'cardinality', 'Unique Files'),
+    'event.category: "configuration"');
+
+  const visSchedTypePie = vis(VIS_SCHED_TYPE_PIE,
+    '[XDR] Task Type Distribution', 'Breakdown of scheduled task types: cron, anacron, at, systemd-timer',
+    pieVis('[XDR] Task Type Distribution', 'payload.xdr.scheduled_task.type', 'Task Type', 10),
+    'event.category: "configuration"');
+
+  const visSchedActionPie = vis(VIS_SCHED_ACTION_PIE,
+    '[XDR] Task Event Actions', 'Distribution of task change actions: created, modified, deleted',
+    pieVis('[XDR] Task Event Actions', 'event.action', 'Action', 5),
+    'event.category: "configuration"');
+
+  const visSchedTopFiles = vis(VIS_SCHED_TOP_FILES,
+    '[XDR] Top Modified Task Files', 'Top 20 most frequently changed scheduled task files — high-frequency changes may indicate persistence activity',
+    topNTermsCountBarVis('[XDR] Top Modified Task Files', 'payload.xdr.scheduled_task.path', 'File', 20),
+    'event.category: "configuration"');
+
+  const visSchedTimeline = vis(VIS_SCHED_TIMELINE,
+    '[XDR] Scheduled Task Events Over Time', 'Scheduled task change events over time, stacked by action',
+    countAreaGroupVis('[XDR] Scheduled Task Events Over Time', 'event.action', 'Action', 'Events'),
+    'event.category: "configuration"');
+
+  // ── Scheduled Task Dashboard ──────────────────────────────────────────────
+  // Layout (48 cols):
+  //   Row  0: nav (48, 5)
+  //   Row  5: sched-events (24, 8) | unique-files (24, 8)
+  //   Row 13: type-pie (24, 16) | action-pie (24, 16)
+  //   Row 29: timeline (48, 14)
+  //   Row 43: top-files (48, 16)
+
+  const dashScheduled = dashboard(DASH_SCHEDULED, 'XDR Telemetry — Scheduled Tasks',
+    'Scheduled task / cron change monitoring: task types, change actions, most frequently modified files, and event timeline.', [
+      { x: 0,  y: 0,  w: 48, h: 5,  ref: 'panel_0' },
+      { x: 0,  y: 5,  w: 24, h: 8,  ref: 'panel_1' },
+      { x: 24, y: 5,  w: 24, h: 8,  ref: 'panel_2' },
+      { x: 0,  y: 13, w: 24, h: 16, ref: 'panel_3' },
+      { x: 24, y: 13, w: 24, h: 16, ref: 'panel_4' },
+      { x: 0,  y: 29, w: 48, h: 14, ref: 'panel_5' },
+      { x: 0,  y: 43, w: 48, h: 16, ref: 'panel_6' },
+    ], [
+      { name: 'panel_0', id: NAV_SCHEDULED          },
+      { name: 'panel_1', id: VIS_SCHED_EVENTS        },
+      { name: 'panel_2', id: VIS_SCHED_UNIQUE_FILES  },
+      { name: 'panel_3', id: VIS_SCHED_TYPE_PIE      },
+      { name: 'panel_4', id: VIS_SCHED_ACTION_PIE    },
+      { name: 'panel_5', id: VIS_SCHED_TIMELINE      },
+      { name: 'panel_6', id: VIS_SCHED_TOP_FILES     },
+    ]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // INJECTION / PTRACE ALERT visualizations
+  // event.category: "intrusion_detection", event.kind: "alert"
+  // payload.xdr.injection.{indicator, detail, target.*, tracer.*}
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const visInjAlerts = vis(VIS_INJ_ALERTS,
+    '[XDR] Injection Alerts', 'Total count of process injection / ptrace alerts raised by the agent',
+    metricVis('[XDR] Injection Alerts', null, 'count', 'Injection Alerts'),
+    'event.category: "intrusion_detection"');
+
+  const visInjUniqueTargets = vis(VIS_INJ_UNIQUE_TARGETS,
+    '[XDR] Unique Target Processes', 'Distinct target process names observed as injection targets',
+    metricVis('[XDR] Unique Target Processes', 'payload.xdr.injection.target.name', 'cardinality', 'Unique Targets'),
+    'event.category: "intrusion_detection"');
+
+  const visInjUniqueIndicators = vis(VIS_INJ_UNIQUE_INDICATORS,
+    '[XDR] Unique Injection Indicators', 'Distinct injection indicator types observed (e.g. ptrace-attach, ptrace-traceme)',
+    metricVis('[XDR] Unique Injection Indicators', 'payload.xdr.injection.indicator', 'cardinality', 'Unique Indicators'),
+    'event.category: "intrusion_detection"');
+
+  const visInjIndicatorPie = vis(VIS_INJ_INDICATOR_PIE,
+    '[XDR] Injection Indicator Types', 'Breakdown of injection indicator types — each type maps to a MITRE ATT&CK sub-technique',
+    pieVis('[XDR] Injection Indicator Types', 'payload.xdr.injection.indicator', 'Indicator', 10),
+    'event.category: "intrusion_detection"');
+
+  const visInjTopTargets = vis(VIS_INJ_TOP_TARGETS,
+    '[XDR] Top Injection Target Processes', 'Top 20 target processes most frequently observed as injection targets',
+    topNTermsCountBarVis('[XDR] Top Injection Target Processes', 'payload.xdr.injection.target.name', 'Target Process', 20),
+    'event.category: "intrusion_detection"');
+
+  const visInjTopTracers = vis(VIS_INJ_TOP_TRACERS,
+    '[XDR] Top Tracer Processes', 'Top 20 tracer (injector) processes — unexpected system utilities acting as tracers warrant investigation',
+    topNTermsCountBarVis('[XDR] Top Tracer Processes', 'payload.xdr.injection.tracer.name', 'Tracer Process', 20),
+    'event.category: "intrusion_detection"');
+
+  const visInjTimeline = vis(VIS_INJ_TIMELINE,
+    '[XDR] Injection Alerts Over Time', 'Process injection alert volume over time, stacked by indicator type',
+    countAreaGroupVis('[XDR] Injection Alerts Over Time', 'payload.xdr.injection.indicator', 'Indicator', 'Alerts'),
+    'event.category: "intrusion_detection"');
+
+  // ── Injection Dashboard ───────────────────────────────────────────────────
+  // Layout (48 cols):
+  //   Row  0: nav (48, 5)
+  //   Row  5: inj-alerts (16, 8) | unique-targets (16, 8) | unique-indicators (16, 8)
+  //   Row 13: indicator-pie (48, 16)
+  //   Row 29: timeline (48, 14)
+  //   Row 43: top-targets (24, 16) | top-tracers (24, 16)
+
+  const dashInjection = dashboard(DASH_INJECTION, 'XDR Telemetry — Injection Alerts',
+    'Process injection and ptrace monitoring: indicator types, target and tracer processes, and alert timeline. MITRE T1055.', [
+      { x: 0,  y: 0,  w: 48, h: 5,  ref: 'panel_0' },
+      { x: 0,  y: 5,  w: 16, h: 8,  ref: 'panel_1' },
+      { x: 16, y: 5,  w: 16, h: 8,  ref: 'panel_2' },
+      { x: 32, y: 5,  w: 16, h: 8,  ref: 'panel_3' },
+      { x: 0,  y: 13, w: 48, h: 16, ref: 'panel_4' },
+      { x: 0,  y: 29, w: 48, h: 14, ref: 'panel_5' },
+      { x: 0,  y: 43, w: 24, h: 16, ref: 'panel_6' },
+      { x: 24, y: 43, w: 24, h: 16, ref: 'panel_7' },
+    ], [
+      { name: 'panel_0', id: NAV_INJECTION              },
+      { name: 'panel_1', id: VIS_INJ_ALERTS             },
+      { name: 'panel_2', id: VIS_INJ_UNIQUE_TARGETS     },
+      { name: 'panel_3', id: VIS_INJ_UNIQUE_INDICATORS  },
+      { name: 'panel_4', id: VIS_INJ_INDICATOR_PIE      },
+      { name: 'panel_5', id: VIS_INJ_TIMELINE           },
+      { name: 'panel_6', id: VIS_INJ_TOP_TARGETS        },
+      { name: 'panel_7', id: VIS_INJ_TOP_TRACERS        },
+    ]);
+
   return {
     indexPatterns: [indexPattern],
     dashboardObjects: [
       // Navigation markdown
       navHost, navProcess, navNetwork, navFile, navDns, navSession,
+      navLibrary, navKernel, navTty, navScheduled, navInjection,
       // Host
       visHostEvents, visActiveAgents, visAvgMemory, visAvgCpu, visSwapGauge, visDiskGauge,
       visHostnameFilter, visCpuPerAgent, visMemTimeline, visCpuBreakdown, visDiskIO, visNetIO,
@@ -1233,8 +1647,24 @@ function buildSavedObjects() {
       visSessionEvents, visSessionLogins, visSessionLogoffs, visSessionSshFailed,
       visSessionActionPie, visSessionUsersPie, visSessionSudo,
       visSessionTimeline, visSessionSrcIps, visSessionSudoTargets,
+      // Library / SO-load
+      visLibEvents, visLibUnique, visLibUniqueProcs, visLibNamePie, visLibProcPie,
+      visLibTimeline, visLibTopPaths,
+      // Kernel modules
+      visKernEvents, visKernUnique, visKernStatePie, visKernActionPie,
+      visKernTopModules, visKernTimeline,
+      // TTY sessions
+      visTtyEvents, visTtySessions, visTtyProcPie, visTtyNamePie,
+      visTtyTopProcs, visTtyTimeline,
+      // Scheduled tasks
+      visSchedEvents, visSchedUniqueFiles, visSchedTypePie, visSchedActionPie,
+      visSchedTopFiles, visSchedTimeline,
+      // Injection alerts
+      visInjAlerts, visInjUniqueTargets, visInjUniqueIndicators, visInjIndicatorPie,
+      visInjTopTargets, visInjTopTracers, visInjTimeline,
       // Dashboards
       dashHost, dashProcess, dashNetwork, dashFile, dashDns, dashSession,
+      dashLibrary, dashKernel, dashTty, dashScheduled, dashInjection,
     ],
   };
 }
@@ -1273,7 +1703,7 @@ export async function installTelemetryDashboard(
     }
 
     logger.info(
-      `xdr_manager: installed telemetry dashboards (Host, Process, Network, Files, DNS, Sessions) — ${created} objects written`
+      `xdr_manager: installed telemetry dashboards (Host, Process, Network, Files, DNS, Sessions, Libraries, Kernel, TTY, Scheduled, Injection) — ${created} objects written`
     );
   } catch (err) {
     logger.error(`xdr_manager: failed to install telemetry dashboards: ${err}`);
