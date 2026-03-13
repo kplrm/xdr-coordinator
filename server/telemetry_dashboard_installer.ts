@@ -1,17 +1,19 @@
 /*
- * Installs pre-built index-patterns, visualizations, and eleven dashboards
+ * Installs pre-built index-patterns, visualizations, and thirteen dashboards
  * for XDR Agent Telemetry, organised into tab-like views:
- *   - Host      — system CPU & memory metrics
- *   - Process   — per-process CPU usage and lifecycle
- *   - Network   — connection events, protocol/state distribution
- *   - Files     — File Integrity Monitoring (FIM) events, actions, top paths
- *   - DNS       — query types, response codes, top queried domains
- *   - Sessions  — authentication, SSH, sudo, privilege escalation
- *   - Libraries — shared library (SO) load events, unusual paths
- *   - Kernel    — kernel module load/unload events, module states
- *   - TTY       — terminal (TTY/PTY) session start/end events
- *   - Scheduled — cron/anacron/at/systemd-timer change events
- *   - Injection — process injection / ptrace alert events
+ *   - Host        — system CPU & memory metrics
+ *   - Process     — per-process CPU usage and lifecycle
+ *   - Network     — connection events, protocol/state distribution
+ *   - Files       — File Integrity Monitoring (FIM) events, actions, top paths
+ *   - File Access — credential / SSH file access alerts (T1003.008, T1552.004)
+ *   - DNS         — query types, response codes, top queried domains
+ *   - Sessions    — authentication, SSH, sudo, privilege escalation
+ *   - Libraries   — shared library (SO) load events, unusual paths
+ *   - Kernel      — kernel module load/unload events, module states
+ *   - TTY         — terminal (TTY/PTY) session start/end events
+ *   - Scheduled   — cron/anacron/at/systemd-timer change events
+ *   - Injection   — process injection / ptrace alert events
+ *   - IPC         — Unix domain socket and named pipe creation (T1559)
  *
  * Each dashboard carries a markdown "navigation bar" panel at the top whose
  * links point at the other dashboards, giving users a tab-switching UX
@@ -165,6 +167,28 @@ const VIS_INJ_INDICATOR_PIE     = 'xdr-tel-vis-inj-indicator-pie';
 const VIS_INJ_TOP_TARGETS       = 'xdr-tel-vis-inj-top-targets';
 const VIS_INJ_TOP_TRACERS       = 'xdr-tel-vis-inj-top-tracers';
 const VIS_INJ_TIMELINE          = 'xdr-tel-vis-inj-timeline';
+
+// File Access visualizations (telemetry.file.access — credential / SSH file reads)
+const DASH_FILEACCESS           = 'xdr-agent-telemetry-fileaccess';
+const NAV_FILEACCESS            = 'xdr-tel-nav-fileaccess';
+const VIS_FA_EVENTS             = 'xdr-tel-vis-fa-events';
+const VIS_FA_UNIQUE_FILES       = 'xdr-tel-vis-fa-unique-files';
+const VIS_FA_TOP_FILES          = 'xdr-tel-vis-fa-top-files';
+const VIS_FA_TOP_DIRS           = 'xdr-tel-vis-fa-top-dirs';
+const VIS_FA_TECHNIQUE_PIE      = 'xdr-tel-vis-fa-technique-pie';
+const VIS_FA_AGENTS_PIE         = 'xdr-tel-vis-fa-agents-pie';
+const VIS_FA_TIMELINE           = 'xdr-tel-vis-fa-timeline';
+
+// IPC visualizations (telemetry.ipc — Unix sockets + named pipes)
+const DASH_IPC                  = 'xdr-agent-telemetry-ipc';
+const NAV_IPC                   = 'xdr-tel-nav-ipc';
+const VIS_IPC_EVENTS            = 'xdr-tel-vis-ipc-events';
+const VIS_IPC_SOCKETS           = 'xdr-tel-vis-ipc-sockets';
+const VIS_IPC_PIPES             = 'xdr-tel-vis-ipc-pipes';
+const VIS_IPC_TYPE_PIE          = 'xdr-tel-vis-ipc-type-pie';
+const VIS_IPC_TOP_SOCKETS       = 'xdr-tel-vis-ipc-top-sockets';
+const VIS_IPC_TOP_PIPES         = 'xdr-tel-vis-ipc-top-pipes';
+const VIS_IPC_TIMELINE          = 'xdr-tel-vis-ipc-timeline';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const ss = (query = '') =>
@@ -546,19 +570,21 @@ function dashboard(
 }
 
 // ── Markdown tab navigation ─────────────────────────────────────────────────
-const navMd = (active: 'host' | 'process' | 'network' | 'file' | 'dns' | 'session' | 'library' | 'kernel' | 'tty' | 'scheduled' | 'injection') => {
-  const hostLabel      = active === 'host'      ? '**▸ Host**'       : `[Host](/app/dashboards#/view/${DASH_HOST})`;
-  const procLabel      = active === 'process'   ? '**▸ Processes**'  : `[Processes](/app/dashboards#/view/${DASH_PROCESS})`;
-  const netLabel       = active === 'network'   ? '**▸ Network**'    : `[Network](/app/dashboards#/view/${DASH_NETWORK})`;
-  const fileLabel      = active === 'file'      ? '**▸ Files**'      : `[Files](/app/dashboards#/view/${DASH_FILE})`;
-  const dnsLabel       = active === 'dns'       ? '**▸ DNS**'        : `[DNS](/app/dashboards#/view/${DASH_DNS})`;
-  const sessionLabel   = active === 'session'   ? '**▸ Sessions**'   : `[Sessions](/app/dashboards#/view/${DASH_SESSION})`;
-  const libraryLabel   = active === 'library'   ? '**▸ Libraries**'  : `[Libraries](/app/dashboards#/view/${DASH_LIBRARY})`;
-  const kernelLabel    = active === 'kernel'    ? '**▸ Kernel**'     : `[Kernel](/app/dashboards#/view/${DASH_KERNEL})`;
-  const ttyLabel       = active === 'tty'       ? '**▸ TTY**'        : `[TTY](/app/dashboards#/view/${DASH_TTY})`;
-  const scheduledLabel = active === 'scheduled' ? '**▸ Scheduled**'  : `[Scheduled](/app/dashboards#/view/${DASH_SCHEDULED})`;
-  const injectionLabel = active === 'injection' ? '**▸ Injection**'  : `[Injection](/app/dashboards#/view/${DASH_INJECTION})`;
-  return `### XDR Agent Telemetry\n${hostLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${procLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${netLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${fileLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${dnsLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${sessionLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${libraryLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${kernelLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${ttyLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${scheduledLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${injectionLabel}`;
+const navMd = (active: 'host' | 'process' | 'network' | 'file' | 'fileaccess' | 'dns' | 'session' | 'library' | 'kernel' | 'tty' | 'scheduled' | 'injection' | 'ipc') => {
+  const hostLabel        = active === 'host'        ? '**▸ Host**'         : `[Host](/app/dashboards#/view/${DASH_HOST})`;
+  const procLabel        = active === 'process'     ? '**▸ Processes**'    : `[Processes](/app/dashboards#/view/${DASH_PROCESS})`;
+  const netLabel         = active === 'network'     ? '**▸ Network**'      : `[Network](/app/dashboards#/view/${DASH_NETWORK})`;
+  const fileLabel        = active === 'file'        ? '**▸ Files**'        : `[Files](/app/dashboards#/view/${DASH_FILE})`;
+  const fileaccessLabel  = active === 'fileaccess'  ? '**▸ File Access**'  : `[File Access](/app/dashboards#/view/${DASH_FILEACCESS})`;
+  const dnsLabel         = active === 'dns'         ? '**▸ DNS**'          : `[DNS](/app/dashboards#/view/${DASH_DNS})`;
+  const sessionLabel     = active === 'session'     ? '**▸ Sessions**'     : `[Sessions](/app/dashboards#/view/${DASH_SESSION})`;
+  const libraryLabel     = active === 'library'     ? '**▸ Libraries**'    : `[Libraries](/app/dashboards#/view/${DASH_LIBRARY})`;
+  const kernelLabel      = active === 'kernel'      ? '**▸ Kernel**'       : `[Kernel](/app/dashboards#/view/${DASH_KERNEL})`;
+  const ttyLabel         = active === 'tty'         ? '**▸ TTY**'          : `[TTY](/app/dashboards#/view/${DASH_TTY})`;
+  const scheduledLabel   = active === 'scheduled'   ? '**▸ Scheduled**'    : `[Scheduled](/app/dashboards#/view/${DASH_SCHEDULED})`;
+  const injectionLabel   = active === 'injection'   ? '**▸ Injection**'    : `[Injection](/app/dashboards#/view/${DASH_INJECTION})`;
+  const ipcLabel         = active === 'ipc'         ? '**▸ IPC**'          : `[IPC](/app/dashboards#/view/${DASH_IPC})`;
+  return `### XDR Agent Telemetry\n${hostLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${procLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${netLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${fileLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${fileaccessLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${dnsLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${sessionLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${libraryLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${kernelLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${ttyLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${scheduledLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${injectionLabel} &nbsp;&nbsp;|&nbsp;&nbsp; ${ipcLabel}`;
 };
 
 function buildSavedObjects() {
@@ -618,6 +644,14 @@ function buildSavedObjects() {
   const navInjection = vis(NAV_INJECTION, '[XDR] Nav — Injection',
     'Tab navigation (Injection active)',
     markdownVis('[XDR] Nav — Injection', navMd('injection')));
+
+  const navFileaccess = vis(NAV_FILEACCESS, '[XDR] Nav — File Access',
+    'Tab navigation (File Access active)',
+    markdownVis('[XDR] Nav — File Access', navMd('fileaccess')));
+
+  const navIpc = vis(NAV_IPC, '[XDR] Nav — IPC',
+    'Tab navigation (IPC active)',
+    markdownVis('[XDR] Nav — IPC', navMd('ipc')));
 
   // ═══════════════════════════════════════════════════════════════════════════
   // HOST visualizations
@@ -1620,12 +1654,184 @@ function buildSavedObjects() {
       { name: 'panel_7', id: VIS_INJ_TOP_TRACERS        },
     ]);
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FILE ACCESS visualizations
+  // event.module: "telemetry.file.access"  (event.severity: 3 — high)
+  // payload.file.{path,name,directory}, threat.technique.id, host.hostname
+  // Monitors: /etc/shadow, /etc/gshadow, /root/.ssh, /etc/ssh, …
+  // MITRE: T1003.008 (OS Credential Dumping: /etc/passwd and /etc/shadow)
+  //        T1552.004 (Unsecured Credentials: Private Keys)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const visFileAccessEvents = vis(VIS_FA_EVENTS,
+    '[XDR] File Access Events',
+    'Total count of sensitive file access events raised by the file-access collector',
+    metricVis('[XDR] File Access Events', null, 'count', 'Access Events'),
+    'event.module: "telemetry.file.access"');
+
+  const visFileAccessUniqueFiles = vis(VIS_FA_UNIQUE_FILES,
+    '[XDR] Unique Accessed Files',
+    'Distinct sensitive file paths accessed in the selected time range',
+    metricVis('[XDR] Unique Accessed Files', 'payload.file.path', 'cardinality', 'Unique Files'),
+    'event.module: "telemetry.file.access"');
+
+  const visFileAccessTopFiles = vis(VIS_FA_TOP_FILES,
+    '[XDR] Top Accessed Sensitive Files',
+    'Top 20 sensitive file paths most frequently accessed — /etc/shadow and SSH key access are high-severity indicators',
+    topNTermsCountBarVis('[XDR] Top Accessed Sensitive Files', 'payload.file.path', 'File Path', 20),
+    'event.module: "telemetry.file.access"');
+
+  const visFileAccessTopDirs = vis(VIS_FA_TOP_DIRS,
+    '[XDR] Top Accessed Sensitive Directories',
+    'Top 15 sensitive directories by access event count — /etc/ssh and /root/.ssh dominate in credential-access attacks',
+    topNTermsCountBarVis('[XDR] Top Accessed Sensitive Directories', 'payload.file.directory', 'Directory', 15),
+    'event.module: "telemetry.file.access"');
+
+  const visFileAccessTechniquePie = vis(VIS_FA_TECHNIQUE_PIE,
+    '[XDR] MITRE Technique Distribution',
+    'File access events broken down by MITRE ATT&CK technique: T1003.008 (shadow) vs T1552.004 (SSH keys)',
+    pieVis('[XDR] MITRE Technique Distribution', 'threat.technique.id', 'Technique', 10),
+    'event.module: "telemetry.file.access"');
+
+  const visFileAccessAgentsPie = vis(VIS_FA_AGENTS_PIE,
+    '[XDR] File Access by Host',
+    'Which endpoints are generating sensitive file access events — high counts on a single host may indicate active attack',
+    pieVis('[XDR] File Access by Host', 'host.hostname', 'Host', 15),
+    'event.module: "telemetry.file.access"');
+
+  const visFileAccessTimeline = vis(VIS_FA_TIMELINE,
+    '[XDR] File Access Events Over Time',
+    'Sensitive file access events over time, stacked by accessed file name',
+    countAreaGroupVis('[XDR] File Access Events Over Time', 'payload.file.name', 'File Name', 'Events'),
+    'event.module: "telemetry.file.access"');
+
+  // ── File Access Dashboard ─────────────────────────────────────────────────
+  // Layout (48 cols):
+  //   Row  0: nav (48, 5)
+  //   Row  5: fa-events (16, 8) | unique-files (16, 8) | agents-pie (16, 8)
+  //   Row 13: technique-pie (24, 16) | top-dirs (24, 16)
+  //   Row 29: timeline (48, 14)
+  //   Row 43: top-files (48, 16)
+
+  const dashFileAccess = dashboard(DASH_FILEACCESS, 'XDR Telemetry — File Access',
+    'Credential and SSH file access monitoring: sensitive file reads, MITRE technique breakdown, top accessed paths. MITRE T1003.008, T1552.004.', [
+      // Row 0 — navigation
+      { x: 0,  y: 0,  w: 48, h: 5,  ref: 'panel_0' },
+      // Row 5 — summary metrics
+      { x: 0,  y: 5,  w: 16, h: 8,  ref: 'panel_1' },
+      { x: 16, y: 5,  w: 16, h: 8,  ref: 'panel_2' },
+      { x: 32, y: 5,  w: 16, h: 8,  ref: 'panel_3' },
+      // Row 13 — technique + top-dirs
+      { x: 0,  y: 13, w: 24, h: 16, ref: 'panel_4' },
+      { x: 24, y: 13, w: 24, h: 16, ref: 'panel_5' },
+      // Row 29 — timeline
+      { x: 0,  y: 29, w: 48, h: 14, ref: 'panel_6' },
+      // Row 43 — top files
+      { x: 0,  y: 43, w: 48, h: 16, ref: 'panel_7' },
+    ], [
+      { name: 'panel_0', id: NAV_FILEACCESS              },
+      { name: 'panel_1', id: VIS_FA_EVENTS               },
+      { name: 'panel_2', id: VIS_FA_UNIQUE_FILES         },
+      { name: 'panel_3', id: VIS_FA_AGENTS_PIE           },
+      { name: 'panel_4', id: VIS_FA_TECHNIQUE_PIE        },
+      { name: 'panel_5', id: VIS_FA_TOP_DIRS             },
+      { name: 'panel_6', id: VIS_FA_TIMELINE             },
+      { name: 'panel_7', id: VIS_FA_TOP_FILES            },
+    ]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // IPC visualizations
+  // event.module: "telemetry.ipc"
+  //   Unix socket: event.type="ipc.unix_socket.created", event.category="network"
+  //     payload.network.unix_socket.path, network.type/transport="unix"
+  //   Named pipe:  event.type="ipc.pipe.created",        event.category="file"
+  //     payload.file.path, payload.file.name, payload.file.directory
+  // MITRE: T1559 (Inter-Process Communication)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const visIpcEvents = vis(VIS_IPC_EVENTS,
+    '[XDR] IPC Events',
+    'Total count of IPC events: Unix domain socket creations and named pipe (FIFO) creations',
+    metricVis('[XDR] IPC Events', null, 'count', 'IPC Events'),
+    'event.module: "telemetry.ipc"');
+
+  const visIpcSockets = vis(VIS_IPC_SOCKETS,
+    '[XDR] Unix Socket Events',
+    'Count of Unix domain socket creation events — unexpected abstract or path-based sockets may indicate covert C2 channels',
+    metricVis('[XDR] Unix Socket Events', null, 'count', 'Unix Sockets'),
+    'event.module: "telemetry.ipc" and event.type: "ipc.unix_socket.created"');
+
+  const visIpcPipes = vis(VIS_IPC_PIPES,
+    '[XDR] Named Pipe Events',
+    'Count of named pipe (FIFO) creation events — pipes in unusual directories or with suspicious names warrant investigation',
+    metricVis('[XDR] Named Pipe Events', null, 'count', 'Named Pipes'),
+    'event.module: "telemetry.ipc" and event.type: "ipc.pipe.created"');
+
+  const visIpcTypePie = vis(VIS_IPC_TYPE_PIE,
+    '[XDR] IPC Event Type Distribution',
+    'Breakdown of IPC event types: Unix socket vs named pipe creation',
+    pieVis('[XDR] IPC Event Type Distribution', 'event.type', 'IPC Type', 5),
+    'event.module: "telemetry.ipc"');
+
+  const visIpcTopSockets = vis(VIS_IPC_TOP_SOCKETS,
+    '[XDR] Top Unix Socket Paths',
+    'Top 20 Unix domain socket paths — abstract sockets (prefix @) or paths outside /run / /tmp may indicate malicious IPC',
+    topNTermsCountBarVis('[XDR] Top Unix Socket Paths', 'payload.network.unix_socket.path', 'Socket Path', 20),
+    'event.module: "telemetry.ipc" and event.type: "ipc.unix_socket.created"');
+
+  const visIpcTopPipes = vis(VIS_IPC_TOP_PIPES,
+    '[XDR] Top Named Pipe Paths',
+    'Top 20 named pipe (FIFO) file paths — pipes in /tmp, /dev/shm, or writable dirs may be used for covert data staging',
+    topNTermsCountBarVis('[XDR] Top Named Pipe Paths', 'payload.file.path', 'Pipe Path', 20),
+    'event.module: "telemetry.ipc" and event.type: "ipc.pipe.created"');
+
+  const visIpcTimeline = vis(VIS_IPC_TIMELINE,
+    '[XDR] IPC Events Over Time',
+    'IPC event volume over time, stacked by event type (unix_socket vs pipe)',
+    countAreaGroupVis('[XDR] IPC Events Over Time', 'event.type', 'IPC Type', 'Events'),
+    'event.module: "telemetry.ipc"');
+
+  // ── IPC Dashboard ──────────────────────────────────────────────────────────
+  // Layout (48 cols):
+  //   Row  0: nav (48, 5)
+  //   Row  5: ipc-events (16, 8) | unix-sockets (16, 8) | named-pipes (16, 8)
+  //   Row 13: type-pie (48, 16)
+  //   Row 29: timeline (48, 14)
+  //   Row 43: top-sockets (24, 16) | top-pipes (24, 16)
+
+  const dashIpc = dashboard(DASH_IPC, 'XDR Telemetry — IPC',
+    'Inter-Process Communication monitoring: Unix domain socket and named pipe creation events, top IPC paths and timeline. MITRE T1559.', [
+      // Row 0 — navigation
+      { x: 0,  y: 0,  w: 48, h: 5,  ref: 'panel_0' },
+      // Row 5 — summary metrics
+      { x: 0,  y: 5,  w: 16, h: 8,  ref: 'panel_1' },
+      { x: 16, y: 5,  w: 16, h: 8,  ref: 'panel_2' },
+      { x: 32, y: 5,  w: 16, h: 8,  ref: 'panel_3' },
+      // Row 13 — type pie (full width)
+      { x: 0,  y: 13, w: 48, h: 16, ref: 'panel_4' },
+      // Row 29 — timeline
+      { x: 0,  y: 29, w: 48, h: 14, ref: 'panel_5' },
+      // Row 43 — top sockets + top pipes
+      { x: 0,  y: 43, w: 24, h: 16, ref: 'panel_6' },
+      { x: 24, y: 43, w: 24, h: 16, ref: 'panel_7' },
+    ], [
+      { name: 'panel_0', id: NAV_IPC              },
+      { name: 'panel_1', id: VIS_IPC_EVENTS       },
+      { name: 'panel_2', id: VIS_IPC_SOCKETS      },
+      { name: 'panel_3', id: VIS_IPC_PIPES        },
+      { name: 'panel_4', id: VIS_IPC_TYPE_PIE     },
+      { name: 'panel_5', id: VIS_IPC_TIMELINE     },
+      { name: 'panel_6', id: VIS_IPC_TOP_SOCKETS  },
+      { name: 'panel_7', id: VIS_IPC_TOP_PIPES    },
+    ]);
+
   return {
     indexPatterns: [indexPattern],
     dashboardObjects: [
       // Navigation markdown
       navHost, navProcess, navNetwork, navFile, navDns, navSession,
       navLibrary, navKernel, navTty, navScheduled, navInjection,
+      navFileaccess, navIpc,
       // Host
       visHostEvents, visActiveAgents, visAvgMemory, visAvgCpu, visSwapGauge, visDiskGauge,
       visHostnameFilter, visCpuPerAgent, visMemTimeline, visCpuBreakdown, visDiskIO, visNetIO,
@@ -1639,6 +1845,10 @@ function buildSavedObjects() {
       visFimEvents, visFimCreated, visFimModified, visFimDeleted,
       visFimActionPie, visFimFileTypes, visFimByOwner,
       visFimTimeline, visFimTopDirs, visFimTopFiles,
+      // File Access
+      visFileAccessEvents, visFileAccessUniqueFiles, visFileAccessTopFiles,
+      visFileAccessTopDirs, visFileAccessTechniquePie, visFileAccessAgentsPie,
+      visFileAccessTimeline,
       // DNS
       visDnsEvents, visDnsQueries, visDnsAnswers, visDnsNxdomain,
       visDnsQtypePie, visDnsRcodePie, visDnsTopProcs,
@@ -1662,9 +1872,13 @@ function buildSavedObjects() {
       // Injection alerts
       visInjAlerts, visInjUniqueTargets, visInjUniqueIndicators, visInjIndicatorPie,
       visInjTopTargets, visInjTopTracers, visInjTimeline,
+      // IPC
+      visIpcEvents, visIpcSockets, visIpcPipes, visIpcTypePie,
+      visIpcTopSockets, visIpcTopPipes, visIpcTimeline,
       // Dashboards
       dashHost, dashProcess, dashNetwork, dashFile, dashDns, dashSession,
       dashLibrary, dashKernel, dashTty, dashScheduled, dashInjection,
+      dashFileAccess, dashIpc,
     ],
   };
 }
@@ -1703,7 +1917,7 @@ export async function installTelemetryDashboard(
     }
 
     logger.info(
-      `xdr_manager: installed telemetry dashboards (Host, Process, Network, Files, DNS, Sessions, Libraries, Kernel, TTY, Scheduled, Injection) — ${created} objects written`
+      `xdr_manager: installed telemetry dashboards (Host, Process, Network, Files, File Access, DNS, Sessions, Libraries, Kernel, TTY, Scheduled, Injection, IPC) — ${created} objects written`
     );
   } catch (err) {
     logger.error(`xdr_manager: failed to install telemetry dashboards: ${err}`);

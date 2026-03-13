@@ -30,20 +30,22 @@ import {
   EuiTabs,
   EuiText,
   EuiTitle,
+  EuiToolTip,
 } from '@elastic/eui';
 import { i18n } from '@osd/i18n';
 import { BrowserRouter as Router } from 'react-router-dom';
 import { CoreStart } from '../../../../src/core/public';
-import { TelemetryDashboard } from './telemetry/telemetry_dashboard';
 import {
   EnrollmentTokenStatusResponse,
   GenerateEnrollmentTokenResponse,
   ListAgentsResponse,
+  ListEnrollmentTokensResponse,
   PolicyLogLevel,
   RunActionResponse,
   UpsertPolicyResponse,
   XdrAction,
   XdrAgent,
+  XdrEnrollmentToken,
   XdrPolicy,
 } from '../../common';
 
@@ -104,7 +106,11 @@ const formatLastSeenAgo = (lastSeen: string, nowMs: number): string => {
 export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDeps) => {
   const [agents, setAgents] = useState<XdrAgent[]>([]);
   const [policies, setPolicies] = useState<XdrPolicy[]>([]);
+  const [latestVersion, setLatestVersion] = useState<string | undefined>(undefined);
   const [isLoading, setIsLoading] = useState(false);
+
+  const [enrollmentTokensList, setEnrollmentTokensList] = useState<XdrEnrollmentToken[]>([]);
+  const [isLoadingTokens, setIsLoadingTokens] = useState(false);
 
   const [isEnrollFlyoutOpen, setIsEnrollFlyoutOpen] = useState(false);
   const [policyId, setPolicyId] = useState('');
@@ -128,7 +134,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
   const [policyAutoUpgrade, setPolicyAutoUpgrade] = useState(false);
   const [policyOsqueryEnabled, setPolicyOsqueryEnabled] = useState(false);
   const [isSavingPolicy, setIsSavingPolicy] = useState(false);
-  const [activeTab, setActiveTab] = useState<'agents' | 'policies' | 'telemetry'>('agents');
+  const [activeTab, setActiveTab] = useState<'agents' | 'policies' | 'tokens'>('agents');
 
   const [agentSearchQuery, setAgentSearchQuery] = useState('');
   const [agentPageSize, setAgentPageSize] = useState(10);
@@ -148,6 +154,9 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       const response = await http.get<ListAgentsResponse>('/api/xdr_manager/agents');
       setAgents(response.agents);
       setPolicies(response.policies);
+      if (response.latestVersion) {
+        setLatestVersion(response.latestVersion);
+      }
       if (!policyId && response.policies.length > 0) {
         setPolicyId(response.policies[0].id);
       }
@@ -165,6 +174,58 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     }
   }, [http, notifications.toasts, policyId]);
 
+  const loadEnrollmentTokens = useCallback(async () => {
+    setIsLoadingTokens(true);
+    try {
+      const response = await http.get<ListEnrollmentTokensResponse>('/api/xdr_manager/enrollment_tokens');
+      setEnrollmentTokensList(response.tokens);
+    } catch (error) {
+      notifications.toasts.addDanger({
+        title: i18n.translate('xdrManager.loadTokensError', {
+          defaultMessage: 'Unable to load enrollment tokens',
+        }),
+        text: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setIsLoadingTokens(false);
+    }
+  }, [http, notifications.toasts]);
+
+  const removeAgent = useCallback(
+    async (agent: XdrAgent) => {
+      const confirmed = window.confirm(
+        i18n.translate('xdrManager.removeAgentConfirm', {
+          defaultMessage:
+            'Remove agent "{name}"? The plugin will forget this agent and further heartbeats and telemetry from it will be rejected.',
+          values: { name: agent.name },
+        })
+      );
+
+      if (!confirmed) {
+        return;
+      }
+
+      try {
+        await http.delete(`/api/xdr_manager/agents/${agent.id}`);
+        notifications.toasts.addSuccess(
+          i18n.translate('xdrManager.agentRemoved', {
+            defaultMessage: 'Agent "{name}" removed.',
+            values: { name: agent.name },
+          })
+        );
+        await loadData();
+      } catch (error) {
+        notifications.toasts.addDanger({
+          title: i18n.translate('xdrManager.removeAgentError', {
+            defaultMessage: 'Unable to remove agent',
+          }),
+          text: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [http, loadData, notifications.toasts]
+  );
+
   useEffect(() => {
     loadData();
   }, [loadData]);
@@ -180,6 +241,12 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
 
     return () => window.clearInterval(timer);
   }, [activeTab, loadData]);
+
+  useEffect(() => {
+    if (activeTab === 'tokens') {
+      loadEnrollmentTokens();
+    }
+  }, [activeTab, loadEnrollmentTokens]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -427,6 +494,24 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     {
       field: 'version',
       name: i18n.translate('xdrManager.column.version', { defaultMessage: 'Version' }),
+      render: (version: string) => {
+        const hasUpgrade = latestVersion && version !== latestVersion;
+        return (
+          <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
+            <EuiFlexItem grow={false}>{version}</EuiFlexItem>
+            {hasUpgrade && (
+              <EuiFlexItem grow={false}>
+                <EuiBadge color="warning">
+                  {i18n.translate('xdrManager.upgradeAvailable', {
+                    defaultMessage: 'v{latest} available',
+                    values: { latest: latestVersion },
+                  })}
+                </EuiBadge>
+              </EuiFlexItem>
+            )}
+          </EuiFlexGroup>
+        );
+      },
     },
     {
       field: 'lastSeen',
@@ -439,26 +524,41 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     },
     {
       name: i18n.translate('xdrManager.column.actions', { defaultMessage: 'Actions' }),
-      width: '240px',
-      render: (agent: XdrAgent) => (
-        <EuiFlexGroup gutterSize="s" responsive={false}>
-          <EuiFlexItem grow={false}>
-            <EuiButtonEmpty size="xs" onClick={() => runAction(agent.id, 'restart')}>
-              {i18n.translate('xdrManager.action.restart', { defaultMessage: 'Restart' })}
-            </EuiButtonEmpty>
-          </EuiFlexItem>
-          <EuiFlexItem grow={false}>
-            <EuiButtonEmpty size="xs" onClick={() => runAction(agent.id, 'isolate')}>
-              {i18n.translate('xdrManager.action.isolate', { defaultMessage: 'Isolate' })}
-            </EuiButtonEmpty>
-          </EuiFlexItem>
-          <EuiFlexItem grow={false}>
-            <EuiButtonEmpty size="xs" onClick={() => runAction(agent.id, 'upgrade')}>
-              {i18n.translate('xdrManager.action.upgrade', { defaultMessage: 'Upgrade' })}
-            </EuiButtonEmpty>
-          </EuiFlexItem>
-        </EuiFlexGroup>
-      ),
+      width: '200px',
+      render: (agent: XdrAgent) => {
+        const canUpgrade = Boolean(latestVersion && agent.version !== latestVersion);
+        return (
+          <EuiFlexGroup gutterSize="s" responsive={false}>
+            <EuiFlexItem grow={false}>
+              <EuiToolTip
+                content={
+                  canUpgrade
+                    ? i18n.translate('xdrManager.action.upgradeTooltip', {
+                        defaultMessage: 'Upgrade to v{version}',
+                        values: { version: latestVersion },
+                      })
+                    : i18n.translate('xdrManager.action.upgradeTooltipCurrent', {
+                        defaultMessage: 'Agent is already on the latest version',
+                      })
+                }
+              >
+                <EuiButtonEmpty
+                  size="xs"
+                  isDisabled={!canUpgrade}
+                  onClick={() => runAction(agent.id, 'upgrade')}
+                >
+                  {i18n.translate('xdrManager.action.upgrade', { defaultMessage: 'Upgrade' })}
+                </EuiButtonEmpty>
+              </EuiToolTip>
+            </EuiFlexItem>
+            <EuiFlexItem grow={false}>
+              <EuiButtonEmpty size="xs" color="danger" onClick={() => removeAgent(agent)}>
+                {i18n.translate('xdrManager.action.remove', { defaultMessage: 'Remove' })}
+              </EuiButtonEmpty>
+            </EuiFlexItem>
+          </EuiFlexGroup>
+        );
+      },
     },
   ];
 
@@ -512,6 +612,36 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
           </EuiFlexItem>
         </EuiFlexGroup>
       ),
+    },
+  ];
+
+  const tokenColumns = [
+    {
+      field: 'token' as const,
+      name: i18n.translate('xdrManager.tokenColumn.token', { defaultMessage: 'Token' }),
+      render: (_token: string, item: XdrEnrollmentToken) => (
+        <EuiText size="s">
+          <code style={{ fontFamily: 'monospace', fontSize: '0.8em' }}>
+            {item.token.length > 40 ? `${item.token.slice(0, 40)}…` : item.token}
+          </code>
+        </EuiText>
+      ),
+    },
+    {
+      field: 'policyName' as const,
+      name: i18n.translate('xdrManager.tokenColumn.policy', { defaultMessage: 'Policy' }),
+    },
+    {
+      field: 'status' as const,
+      name: i18n.translate('xdrManager.tokenColumn.status', { defaultMessage: 'Status' }),
+      render: (status: string) => (
+        <EuiBadge color={status === 'consumed' ? 'success' : 'primary'}>{status}</EuiBadge>
+      ),
+    },
+    {
+      field: 'createdAt' as const,
+      name: i18n.translate('xdrManager.tokenColumn.createdAt', { defaultMessage: 'Created' }),
+      render: (ts: string) => new Date(ts).toLocaleString(),
     },
   ];
 
@@ -608,8 +738,8 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
             <EuiTab onClick={() => setActiveTab('policies')} isSelected={activeTab === 'policies'}>
               {i18n.translate('xdrManager.tabPolicies', { defaultMessage: 'Policy management' })}
             </EuiTab>
-            <EuiTab onClick={() => setActiveTab('telemetry')} isSelected={activeTab === 'telemetry'}>
-              {i18n.translate('xdrManager.tabTelemetry', { defaultMessage: 'Telemetry' })}
+            <EuiTab onClick={() => setActiveTab('tokens')} isSelected={activeTab === 'tokens'}>
+              {i18n.translate('xdrManager.tabTokens', { defaultMessage: 'Enrollment tokens' })}
             </EuiTab>
           </EuiTabs>
 
@@ -742,8 +872,54 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
             </EuiPanel>
           )}
 
-          {activeTab === 'telemetry' && (
-            <TelemetryDashboard http={http} notifications={notifications} />
+          {activeTab === 'tokens' && (
+            <EuiPanel>
+              <EuiText size="s" color="subdued">
+                <p>
+                  {i18n.translate('xdrManager.tokensSectionDescription', {
+                    defaultMessage:
+                      'Enrollment tokens authorise new agents to join. Only agents that enrolled with a valid token are accepted. Pending tokens have not yet been consumed by an agent.',
+                  })}
+                </p>
+              </EuiText>
+
+              <EuiSpacer size="m" />
+
+              <EuiButton
+                iconType="refresh"
+                size="s"
+                onClick={loadEnrollmentTokens}
+                isLoading={isLoadingTokens}
+              >
+                {i18n.translate('xdrManager.tokensRefresh', { defaultMessage: 'Refresh' })}
+              </EuiButton>
+
+              <EuiSpacer size="m" />
+
+              <div style={{ overflowX: 'auto' }}>
+                <EuiInMemoryTable
+                  itemId="token"
+                  items={enrollmentTokensList}
+                  loading={isLoadingTokens}
+                  pagination={false}
+                  sorting={false}
+                  columns={tokenColumns}
+                />
+              </div>
+
+              {enrollmentTokensList.length === 0 && !isLoadingTokens && (
+                <>
+                  <EuiSpacer size="m" />
+                  <EuiText size="s" color="subdued" textAlign="center">
+                    <p>
+                      {i18n.translate('xdrManager.noTokens', {
+                        defaultMessage: 'No enrollment tokens yet. Generate one from the Agents tab.',
+                      })}
+                    </p>
+                  </EuiText>
+                </>
+              )}
+            </EuiPanel>
           )}
 
           {isEnrollFlyoutOpen && (

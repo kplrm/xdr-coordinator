@@ -214,6 +214,13 @@ function buildIndexTemplate() {
                           used:  { properties: { bytes: { type: 'long' }, pct: { type: 'float' } } },
                         },
                       },
+                      boot: {
+                        properties: {
+                          total: { type: 'long' },
+                          free:  { type: 'long' },
+                          used:  { properties: { bytes: { type: 'long' }, pct: { type: 'float' } } },
+                        },
+                      },
                     },
                   },
                 },
@@ -285,6 +292,7 @@ function buildIndexTemplate() {
                     properties: {
                       read_bytes:  { type: 'long' },
                       write_bytes: { type: 'long' },
+                      pipe_name:   { type: 'keyword' },   // IPC named-pipe path
                     },
                   },
                   // ── Lineage ───────────────────────────────────────────
@@ -295,9 +303,33 @@ function buildIndexTemplate() {
                       name:         { type: 'keyword' },
                       executable:   { type: 'keyword' },
                       command_line: { type: 'keyword' },
+                      args:         { type: 'keyword' },
                       entity_id:    { type: 'keyword' },
                     },
                   },
+                  // ── Extended process fields ────────────────────────────
+                  ancestors: { type: 'object', dynamic: true },
+                  group_leader: {
+                    properties: {
+                      pid:       { type: 'integer' },
+                      name:      { type: 'keyword' },
+                      entity_id: { type: 'keyword' },
+                    },
+                  },
+                  env:    { type: 'object', dynamic: true },
+                  script: {
+                    properties: {
+                      path:    { type: 'keyword' },
+                      content: { type: 'keyword', index: false },
+                      length:  { type: 'long' },
+                    },
+                  },
+                },
+              },
+              // ── Container context ──────────────────────────────────────
+              container: {
+                properties: {
+                  id: { type: 'keyword' },
                 },
               },
               // ── ECS network fields (connection events) ─────────────────
@@ -317,6 +349,12 @@ function buildIndexTemplate() {
                   remote_port: { type: 'integer' },
                   inode:       { type: 'long' },
                   uid:         { type: 'integer' },
+                  // IPC — Unix domain socket path
+                  unix_socket: {
+                    properties: {
+                      path: { type: 'keyword' },
+                    },
+                  },
                 },
               },
               // ── ECS source / destination (replaces local/remote_addr) ──
@@ -326,7 +364,7 @@ function buildIndexTemplate() {
                   port: { type: 'integer' },
                   user: {
                     properties: {
-                      id:   { type: 'integer' },
+                      id:   { type: 'keyword' },   // ECS: source.user.id is keyword/string
                       name: { type: 'keyword' },
                     },
                   },
@@ -358,6 +396,8 @@ function buildIndexTemplate() {
                       sha256: { type: 'keyword' },
                     },
                   },
+                  entropy:      { type: 'float' },
+                  header_bytes: { type: 'keyword', index: false },
                 },
               },
               // ── FIM-specific context (action + previous state delta) ────

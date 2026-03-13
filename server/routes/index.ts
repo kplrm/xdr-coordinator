@@ -1,5 +1,6 @@
 import { schema } from '@osd/config-schema';
 import { randomBytes } from 'crypto';
+import * as https from 'https';
 import { IRouter, ISavedObjectsRepository, Logger } from '../../../../src/core/server';
 import {
   AgentStatus,
@@ -11,15 +12,17 @@ import {
   ControlPlaneTelemetryResponse,
   EnrollmentTokenStatusResponse,
   GenerateEnrollmentTokenResponse,
+  LatestVersionResponse,
   ListAgentsResponse,
-  RunActionRequest,
+  ListEnrollmentTokensResponse,
+  RemoveAgentResponse,
   RunActionResponse,
   UpsertPolicyRequest,
   UpsertPolicyResponse,
-  XdrAction,
   XdrAgent,
   XdrPolicy,
   XDR_AGENT_SAVED_OBJECT_TYPE,
+  XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE,
 } from '../../common';
 import { defineTelemetryRoutes } from './telemetry';
 
@@ -60,7 +63,7 @@ function toXdrAgent(so: { id: string; attributes: XdrAgentAttributes }): XdrAgen
   };
 }
 
-type EnrollmentTokenRecord = {
+type EnrollmentTokenAttributes = {
   token: string;
   policyId: string;
   createdAt: string;
@@ -69,13 +72,63 @@ type EnrollmentTokenRecord = {
   consumedHostname?: string;
 };
 
-const enrollmentTokens: EnrollmentTokenRecord[] = [];
+// ── In-memory control-plane state ─────────────────────────────────────────
+// Agents removed via the UI can no longer send heartbeats or telemetry.
+const removedAgentIds = new Set<string>();
 
-const actionToStatusMap: Record<XdrAction, AgentStatus> = {
-  restart: 'healthy',
-  isolate: 'offline',
-  upgrade: 'healthy',
-};
+// Agents that have a pending upgrade command (cleared once the agent reports
+// the expected version).
+const pendingUpgradeAgentIds = new Set<string>();
+
+// GitHub latest-release cache (refreshed at most once per minute).
+interface VersionCache {
+  version: string;
+  fetchedAt: number;
+}
+let latestVersionCache: VersionCache | null = null;
+const VERSION_CACHE_TTL_MS = 60_000;
+
+function fetchLatestVersionFromGitHub(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.github.com',
+      path: '/repos/kplrm/xdr-agent/releases/latest',
+      method: 'GET',
+      headers: { 'User-Agent': 'xdr-manager-plugin' },
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          const tagName: string = parsed.tag_name ?? '';
+          // Strip leading 'v' if present
+          const version = tagName.startsWith('v') ? tagName.slice(1) : tagName;
+          if (!version) {
+            reject(new Error(`Could not parse tag_name from GitHub response`));
+          } else {
+            resolve(version);
+          }
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function getCachedLatestVersion(): Promise<string> {
+  const now = Date.now();
+  if (latestVersionCache && now - latestVersionCache.fetchedAt < VERSION_CACHE_TTL_MS) {
+    return latestVersionCache.version;
+  }
+  const version = await fetchLatestVersionFromGitHub();
+  latestVersionCache = { version, fetchedAt: now };
+  return version;
+}
 
 const STALE_AGENT_THRESHOLD_MS = 5 * 60 * 1000;
 
@@ -94,16 +147,6 @@ const deriveAgentStatus = (agent: XdrAgent, nowMs: number): AgentStatus => {
   }
 
   return agent.status;
-};
-
-const bumpVersion = (version: string): string => {
-  const parts = version.split('.').map((part) => Number(part));
-  if (parts.length !== 3 || parts.some((part) => Number.isNaN(part))) {
-    return '1.0.1';
-  }
-
-  parts[2] += 1;
-  return parts.join('.');
 };
 
 const toPolicyId = (value: string): string => {
@@ -173,11 +216,11 @@ export function defineRoutes(
 
       const token = issueEnrollmentToken();
       const createdAt = new Date().toISOString();
-      enrollmentTokens.unshift({
-        token,
-        policyId: request.body.policyId,
-        createdAt,
-      });
+      const repo = await agentRepoPromise;
+      await repo.create<EnrollmentTokenAttributes>(
+        XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE,
+        { token, policyId: request.body.policyId, createdAt }
+      );
 
       const body: GenerateEnrollmentTokenResponse = {
         token,
@@ -199,21 +242,29 @@ export function defineRoutes(
       },
     },
     async (_context, request, response) => {
-      const tokenRecord = enrollmentTokens.find((item) => item.token === request.params.token);
-      if (!tokenRecord) {
+      const repo = await agentRepoPromise;
+      const result = await repo.find<EnrollmentTokenAttributes>({
+        type: XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE,
+        search: request.params.token,
+        searchFields: ['token'],
+        perPage: 1,
+      });
+      const tokenSO = result.saved_objects[0] ?? null;
+      if (!tokenSO) {
         return response.notFound({
           body: `Enrollment token [${request.params.token}] not found`,
         });
       }
 
+      const t = tokenSO.attributes;
       const body: EnrollmentTokenStatusResponse = {
-        token: tokenRecord.token,
-        policyId: tokenRecord.policyId,
-        status: tokenRecord.consumedAt ? 'consumed' : 'pending',
-        createdAt: tokenRecord.createdAt,
-        consumedAt: tokenRecord.consumedAt,
-        consumedAgentId: tokenRecord.consumedAgentId,
-        consumedHostname: tokenRecord.consumedHostname,
+        token: t.token,
+        policyId: t.policyId,
+        status: t.consumedAt ? 'consumed' : 'pending',
+        createdAt: t.createdAt,
+        consumedAt: t.consumedAt,
+        consumedAgentId: t.consumedAgentId,
+        consumedHostname: t.consumedHostname,
       };
 
       return response.ok({ body });
@@ -241,6 +292,7 @@ export function defineRoutes(
       },
     },
     async (_context, request, response) => {
+      const repo = await agentRepoPromise;
       const bearerToken = readBearerToken(request.headers.authorization);
       if (!bearerToken) {
         return response.unauthorized({
@@ -250,8 +302,15 @@ export function defineRoutes(
         });
       }
 
-      const tokenRecord = enrollmentTokens.find((item) => item.token === bearerToken);
-      if (!tokenRecord) {
+      // Look up the token record from saved objects
+      const tokenSearchResult = await repo.find<EnrollmentTokenAttributes>({
+        type: XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE,
+        search: bearerToken,
+        searchFields: ['token'],
+        perPage: 1,
+      });
+      const tokenSO = tokenSearchResult.saved_objects[0] ?? null;
+      if (!tokenSO) {
         return response.unauthorized({
           body: {
             message: 'Enrollment token is invalid',
@@ -259,7 +318,7 @@ export function defineRoutes(
         });
       }
 
-      if (tokenRecord.consumedAt) {
+      if (tokenSO.attributes.consumedAt) {
         return response.unauthorized({
           body: {
             message: 'Enrollment token already used',
@@ -268,10 +327,10 @@ export function defineRoutes(
       }
 
       const payload = request.body as ControlPlaneEnrollRequest;
-      if (tokenRecord.policyId !== payload.policy_id) {
+      if (tokenSO.attributes.policyId !== payload.policy_id) {
         return response.badRequest({
           body: {
-            message: `Enrollment token policy mismatch: token=${tokenRecord.policyId} request=${payload.policy_id}`,
+            message: `Enrollment token policy mismatch: token=${tokenSO.attributes.policyId} request=${payload.policy_id}`,
           },
         });
       }
@@ -286,7 +345,6 @@ export function defineRoutes(
       }
 
       const now = new Date().toISOString();
-      const repo = await agentRepoPromise;
       const agentAttrs: XdrAgentAttributes = {
         name: payload.hostname,
         policyId: payload.policy_id,
@@ -335,9 +393,12 @@ export function defineRoutes(
         message: `enrolled agent ${payload.hostname}`,
       };
 
-      tokenRecord.consumedAt = now;
-      tokenRecord.consumedAgentId = payload.agent_id;
-      tokenRecord.consumedHostname = payload.hostname;
+      // Mark token as consumed in saved objects
+      await repo.update<EnrollmentTokenAttributes>(XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE, tokenSO.id, {
+        consumedAt: now,
+        consumedAgentId: payload.agent_id,
+        consumedHostname: payload.hostname,
+      });
 
       return response.ok({ body });
     }
@@ -362,6 +423,14 @@ export function defineRoutes(
     },
     async (_context, request, response) => {
       const payload = request.body as ControlPlaneHeartbeatRequest;
+
+      // Reject heartbeats from agents that were removed via the UI.
+      if (removedAgentIds.has(payload.agent_id)) {
+        return response.unauthorized({
+          body: { message: `Agent [${payload.agent_id}] has been removed` },
+        });
+      }
+
       const repo = await agentRepoPromise;
 
       try {
@@ -386,8 +455,28 @@ export function defineRoutes(
         version: payload.agent_version,
       });
 
+      // Build pending commands list.
+      const pendingCommands: string[] = [];
+      if (pendingUpgradeAgentIds.has(payload.agent_id)) {
+        // Fetch current latest version to tell the agent what to install
+        let latestVersion: string | undefined;
+        try {
+          latestVersion = await getCachedLatestVersion();
+        } catch {
+          // If we can't reach GitHub, skip upgrade command this cycle
+        }
+
+        if (latestVersion && payload.agent_version !== latestVersion) {
+          pendingCommands.push(`upgrade:${latestVersion}`);
+        } else {
+          // Agent already on latest version (or we couldn't determine it)
+          pendingUpgradeAgentIds.delete(payload.agent_id);
+        }
+      }
+
       const body: ControlPlaneHeartbeatResponse = {
         message: `heartbeat accepted for ${payload.hostname}`,
+        pending_commands: pendingCommands.length > 0 ? pendingCommands : undefined,
       };
 
       return response.ok({ body });
@@ -408,6 +497,14 @@ export function defineRoutes(
         sortOrder: 'desc',
       });
 
+      // Fetch latest version from GitHub (non-blocking — use cached value on error)
+      let latestVersion: string | undefined;
+      try {
+        latestVersion = await getCachedLatestVersion();
+      } catch {
+        // Continue without version info if GitHub is unreachable
+      }
+
       const nowMs = Date.now();
       const body: ListAgentsResponse = {
         agents: result.saved_objects.map((so) => {
@@ -419,6 +516,7 @@ export function defineRoutes(
           };
         }),
         policies,
+        latestVersion,
       };
 
       return response.ok({ body });
@@ -603,8 +701,6 @@ export function defineRoutes(
         }),
         body: schema.object({
           action: schema.oneOf([
-            schema.literal('restart'),
-            schema.literal('isolate'),
             schema.literal('upgrade'),
           ]),
         }),
@@ -628,26 +724,15 @@ export function defineRoutes(
         throw err;
       }
 
-      const { action } = request.body as RunActionRequest;
+      // Mark the agent as having a pending upgrade. The upgrade:VERSION
+      // command will be delivered on the next heartbeat.
+      pendingUpgradeAgentIds.add(request.params.id);
 
-      const updates: Partial<XdrAgentAttributes> = {
-        status: actionToStatusMap[action],
-        lastSeen: new Date().toISOString(),
-      };
-      if (action === 'upgrade') {
-        updates.version = bumpVersion(existing.attributes.version);
-      }
-
-      await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, request.params.id, updates);
-
-      const agent: XdrAgent = {
-        ...toXdrAgent(existing),
-        ...updates,
-      };
+      const agent: XdrAgent = toXdrAgent(existing);
 
       const body: RunActionResponse = {
         agent,
-        message: `Action [${action}] completed for ${agent.name}.`,
+        message: `Upgrade queued for ${agent.name}. The agent will upgrade on its next heartbeat.`,
       };
 
       return response.ok({ body });
@@ -692,6 +777,13 @@ export function defineRoutes(
     },
     async (context, request, response) => {
       const payload = request.body as ControlPlaneTelemetryRequest;
+
+      // Reject telemetry from agents that were removed via the UI.
+      if (removedAgentIds.has(payload.agent_id)) {
+        return response.unauthorized({
+          body: { message: `Agent [${payload.agent_id}] has been removed` },
+        });
+      }
 
       // Build the daily index name
       const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -754,6 +846,109 @@ export function defineRoutes(
           body: {
             message: `Failed to index telemetry events: ${err}`,
           },
+        });
+      }
+    }
+  );
+
+  // ── DELETE /api/xdr_manager/agents/{id} ────────────────────────────────
+  // Removes a known agent: deletes its saved object and adds its ID to the
+  // in-memory blocklist so further heartbeats and telemetry are rejected.
+
+  router.delete(
+    {
+      path: '/api/xdr_manager/agents/{id}',
+      validate: {
+        params: schema.object({
+          id: schema.string({ minLength: 1 }),
+        }),
+      },
+    },
+    async (_context, request, response) => {
+      const agentId = request.params.id;
+      const repo = await agentRepoPromise;
+
+      try {
+        await repo.delete(XDR_AGENT_SAVED_OBJECT_TYPE, agentId);
+      } catch (err: any) {
+        if (err?.output?.statusCode !== 404) {
+          throw err;
+        }
+        // Already gone — still add to blocklist below
+      }
+
+      // Add to blocklist so further heartbeats / telemetry are rejected even
+      // if another process re-creates the object.
+      removedAgentIds.add(agentId);
+      pendingUpgradeAgentIds.delete(agentId);
+
+      const body: RemoveAgentResponse = {
+        removedAgentId: agentId,
+        message: `Agent [${agentId}] removed. Further communications will be rejected.`,
+      };
+
+      return response.ok({ body });
+    }
+  );
+
+  // ── GET /api/xdr_manager/enrollment_tokens ─────────────────────────────
+  // Returns all enrollment tokens with their status and associated policy.
+
+  router.get(
+    {
+      path: '/api/xdr_manager/enrollment_tokens',
+      validate: false,
+    },
+    async (_context, _request, response) => {
+      const policyNameById = Object.fromEntries(
+        policies.map((policy) => [policy.id, policy.name])
+      );
+
+      const repo = await agentRepoPromise;
+      const result = await repo.find<EnrollmentTokenAttributes>({
+        type: XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE,
+        perPage: 10000,
+        sortField: 'createdAt',
+        sortOrder: 'desc',
+      });
+
+      const body: ListEnrollmentTokensResponse = {
+        tokens: result.saved_objects.map((so) => {
+          const t = so.attributes;
+          return {
+            token: t.token,
+            policyId: t.policyId,
+            policyName: policyNameById[t.policyId] ?? t.policyId,
+            status: (t.consumedAt ? 'consumed' : 'pending') as 'consumed' | 'pending',
+            createdAt: t.createdAt,
+            consumedAt: t.consumedAt,
+            consumedHostname: t.consumedHostname,
+          };
+        }),
+      };
+
+      return response.ok({ body });
+    }
+  );
+
+  // ── GET /api/xdr_manager/version/latest ────────────────────────────────
+  // Returns the latest xdr-agent version from GitHub releases (cached).
+
+  router.get(
+    {
+      path: '/api/xdr_manager/version/latest',
+      validate: false,
+    },
+    async (_context, _request, response) => {
+      try {
+        const version = await getCachedLatestVersion();
+        const body: LatestVersionResponse = { version };
+        return response.ok({ body });
+      } catch (err) {
+        logger.warn(`Failed to fetch latest version from GitHub: ${err}`);
+        return response.customError({
+          statusCode: 502,
+          body: { message: `Failed to fetch latest version: ${err}` },
         });
       }
     }

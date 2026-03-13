@@ -1,5 +1,5 @@
 export type AgentStatus = 'healthy' | 'degraded' | 'offline' | 'unseen';
-export type XdrAction = 'restart' | 'isolate' | 'upgrade';
+export type XdrAction = 'upgrade';
 export type PolicyLogLevel = 'minimal' | 'standard' | 'verbose';
 
 export interface XdrPolicy {
@@ -26,6 +26,7 @@ export interface XdrAgent {
 export interface ListAgentsResponse {
   agents: XdrAgent[];
   policies: XdrPolicy[];
+  latestVersion?: string;
 }
 
 export interface EnrollAgentRequest {
@@ -86,6 +87,7 @@ export interface ControlPlaneHeartbeatRequest {
 
 export interface ControlPlaneHeartbeatResponse {
   message: string;
+  pending_commands?: string[];
 }
 
 export interface RunActionRequest {
@@ -95,6 +97,29 @@ export interface RunActionRequest {
 export interface RunActionResponse {
   agent: XdrAgent;
   message: string;
+}
+
+export interface RemoveAgentResponse {
+  removedAgentId: string;
+  message: string;
+}
+
+export interface XdrEnrollmentToken {
+  token: string;
+  policyId: string;
+  policyName: string;
+  status: 'pending' | 'consumed';
+  createdAt: string;
+  consumedAt?: string;
+  consumedHostname?: string;
+}
+
+export interface ListEnrollmentTokensResponse {
+  tokens: XdrEnrollmentToken[];
+}
+
+export interface LatestVersionResponse {
+  version: string;
 }
 
 export interface ListPoliciesResponse {
