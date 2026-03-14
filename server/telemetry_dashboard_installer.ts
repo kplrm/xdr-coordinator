@@ -880,7 +880,7 @@ function buildSavedObjects() {
   const visProcUserPie = vis(VIS_PROC_USER_PIE,
     '[XDR] Processes by User',
     'Which users are running the most processes',
-    pieVis('[XDR] Processes by User', 'payload.process.user.id', 'User', 15),
+    pieVis('[XDR] Processes by User', 'payload.process.user.name', 'User', 15),
     'event.category: "process" and event.type: "process.start"');
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -902,8 +902,8 @@ function buildSavedObjects() {
     'event.category: "network" and payload.network.direction: "outbound"');
 
   const visNetProtocol = vis(VIS_NET_PROTOCOL,
-    '[XDR] Protocol Distribution', 'Network events by protocol',
-    pieVis('[XDR] Protocol Distribution', 'payload.network.protocol', 'Protocol'),
+    '[XDR] Protocol Distribution', 'Network events by transport protocol (tcp/udp/unix)',
+    pieVis('[XDR] Protocol Distribution', 'payload.network.transport', 'Protocol'),
     'event.category: "network"');
 
   const visNetState = vis(VIS_NET_STATE,
