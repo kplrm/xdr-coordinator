@@ -23,9 +23,9 @@ OpenSearch Dashboards plugin for enrolling, managing, upgrading, and monitoring 
 
 ### Option 1 — Replace the OpenSearch Dashboards container (recommended)
 
-Pre-built images with the plugin already installed are published to the GitHub Container Registry for every release. Replace your existing `opensearch-dashboards` service with this image — no plugin installation step needed.
+Pre-built images with the plugin already baked in are published to the GitHub Container Registry for every release. This is the only approach that survives container recreation.
 
-Update your `docker-compose.yml`:
+Update the `opensearch-dashboards` service image in your `docker-compose.yml`:
 
 ```yaml
 services:
@@ -43,7 +43,7 @@ services:
       - opensearch-node1
 ```
 
-Then restart the service:
+Recreate the container:
 
 ```bash
 docker compose up -d opensearch-dashboards
@@ -53,9 +53,14 @@ Available image tags:
 - `ghcr.io/kplrm/opensearch-dashboards-xdr:latest` — most recent release
 - `ghcr.io/kplrm/opensearch-dashboards-xdr:v0.1.0` — pinned version
 
+> **Note:** the image can also be pulled and run with plain `docker run` on any machine with Docker, no compose required:
+> ```bash
+> docker pull ghcr.io/kplrm/opensearch-dashboards-xdr:latest
+> ```
+
 ### Option 2 — Install into the running container
 
-If you prefer to keep your existing `opensearch-dashboards` container, install the plugin into it directly:
+> **Warning:** changes made via `docker exec` are stored in the container's writable layer and are **lost whenever the container is recreated** (e.g. `docker compose up -d`, Docker daemon restart with a restart policy, or explicit `docker compose rm`). Use this option only for quick testing on a single machine. For persistent deployments use Option 1.
 
 ```bash
 VERSION=0.1.0
@@ -64,7 +69,18 @@ OSD_VERSION=3.5.0
 docker exec opensearch-dashboards \
   /usr/share/opensearch-dashboards/bin/opensearch-dashboards-plugin install --allow-root \
   "https://github.com/kplrm/xdr-manager-plugin/releases/download/v${VERSION}/xdr-manager-plugin_${VERSION}_osd-${OSD_VERSION}.zip"
+```
 
+Verify the plugin directory was created before restarting:
+
+```bash
+docker exec opensearch-dashboards ls /usr/share/opensearch-dashboards/plugins/
+# xdrManager should appear in the list
+```
+
+Then restart:
+
+```bash
 docker restart opensearch-dashboards
 ```
 
