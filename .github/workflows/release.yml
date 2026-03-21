@@ -92,6 +92,14 @@ jobs:
             --exclude='opensearch-dashboards' \
             ./ opensearch-dashboards/plugins/${{ env.PLUGIN_NAME }}/
 
+      - name: Cache yarn packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/yarn
+          key: ${{ runner.os }}-yarn-osd-${{ hashFiles('opensearch-dashboards/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-osd-
+
       - name: Bootstrap OpenSearch Dashboards
         working-directory: opensearch-dashboards
         run: yarn osd bootstrap --single-version=loose || yarn osd bootstrap --single-version=loose
@@ -220,7 +228,7 @@ jobs:
               echo '==> Contents of plugins/ after install:'
               ls \${OSD_HOME}/plugins/
               if [ ! -d \${OSD_HOME}/plugins/${{ env.PLUGIN_ID }} ]; then
-                echo "ERROR: expected plugin directory '\${OSD_HOME}/plugins/${{ env.PLUGIN_ID }}' not found" >&2
+                echo 'ERROR: plugin directory ${{ env.PLUGIN_ID }} not found after install' >&2
                 exit 1
               fi
               echo '==> Smoke test PASSED: ${{ env.PLUGIN_ID }} is installed'
