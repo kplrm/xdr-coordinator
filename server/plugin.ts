@@ -11,6 +11,7 @@ import { installTelemetryDashboard } from './telemetry_dashboard_installer';
 import { installTelemetryIsmPolicy } from './telemetry_ism_installer';
 import { installSecurityIsmPolicy } from './security_ism_installer';
 import { installAgentLogsIsmPolicy } from './logs_ism_installer';
+import { installManagementIndexPatterns } from './management_index_pattern_installer';
 import { XdrManagerPluginSetup, XdrManagerPluginStart } from './types';
 import { XDR_AGENT_SAVED_OBJECT_TYPE, XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE } from '../common';
 
@@ -84,6 +85,11 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
     // Install the out-of-the-box telemetry dashboard (index-pattern + visualizations + dashboard)
     installTelemetryDashboard(repo, this.logger).catch((err) =>
       this.logger.error(`xdr_manager: telemetry dashboard install failed: ${err}`)
+    );
+
+    // Install out-of-the-box hidden index patterns for logs and security views
+    installManagementIndexPatterns(repo, this.logger).catch((err) =>
+      this.logger.error(`xdr_manager: management index-pattern install failed: ${err}`)
     );
 
     // Install ISM policy (90-day retention) and index template for telemetry indices

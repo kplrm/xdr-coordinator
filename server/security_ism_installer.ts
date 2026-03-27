@@ -90,6 +90,59 @@ function buildIndexTemplate() {
           payload: {
             type: 'object',
             dynamic: true,
+            properties: {
+              // ECS rule fields (detection.malware / detection.behavioral alerts)
+              rule: {
+                properties: {
+                  id: { type: 'keyword' },
+                  name: { type: 'keyword' },
+                  description: { type: 'keyword' },
+                  tags: { type: 'keyword' },
+                },
+              },
+              // ECS file fields (hash match / YARA / static alerts)
+              file: {
+                properties: {
+                  path: { type: 'keyword' },
+                  hash: {
+                    properties: {
+                      sha256: { type: 'keyword' },
+                    },
+                  },
+                },
+              },
+              // Detection metadata
+              method: { type: 'keyword' },    // "hash" | "yara-x" | "static"
+              // ECS event.action — the response taken: "alert" | "block"
+              event: {
+                properties: {
+                  action: { type: 'keyword' },
+                },
+              },
+              // Source event context
+              source: {
+                properties: {
+                  module: { type: 'keyword' },
+                  type: { type: 'keyword' },
+                },
+              },
+              // Threat intel indicator fields
+              indicator: {
+                properties: {
+                  type: { type: 'keyword' },
+                  value: { type: 'keyword' },
+                  source: { type: 'keyword' },
+                },
+              },
+              // MITRE ATT&CK (behavioral rules)
+              mitre: {
+                properties: {
+                  tactic: { type: 'keyword' },
+                  technique: { type: 'keyword' },
+                },
+              },
+              trigger_event_type: { type: 'keyword' },
+            },
           },
         },
       },

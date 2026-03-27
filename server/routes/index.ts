@@ -828,7 +828,7 @@ export function defineRoutes(
 
   const XDR_TELEMETRY_INDEX_PREFIX = '.xdr-agent-telemetry';
   const XDR_SECURITY_INDEX_PREFIX = '.xdr-agent-security';
-  const XDR_LOGS_INDEX_PREFIX = 'xdr-agent-logs';
+  const XDR_LOGS_INDEX_PREFIX = '.xdr-agent-logs';
   const SECURITY_MODULE_PREFIXES = ['detection.', 'prevention.', 'response.'];
   const MAX_EVENTS_PER_INGEST_REQUEST = 1000;
   const BULK_INDEX_CHUNK_SIZE = 250;

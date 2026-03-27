@@ -1,13 +1,13 @@
 /**
  * Sets up an OpenSearch ISM policy and index template for XDR agent logs
- * stored under `xdr-agent-logs-*`.
+ * stored under `.xdr-agent-logs-*`.
  */
 
 import { Logger } from '../../OpenSearch-Dashboards/src/core/server';
 
 const ISM_POLICY_ID = 'xdr-agent-logs-retention';
 const INDEX_TEMPLATE_NAME = 'xdr-agent-logs-template';
-const INDEX_PATTERN = 'xdr-agent-logs-*';
+const INDEX_PATTERN = '.xdr-agent-logs-*';
 
 function buildIsmPolicy() {
   return {
@@ -51,6 +51,7 @@ function buildIndexTemplate() {
       settings: {
         number_of_shards: 1,
         number_of_replicas: 0,
+        'index.hidden': true,
         'opendistro.index_state_management.policy_id': ISM_POLICY_ID,
       },
       mappings: {
