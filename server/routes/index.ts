@@ -186,6 +186,99 @@ export function defineRoutes(
   logger: Logger,
   agentRepoPromise: Promise<ISavedObjectsRepository>
 ) {
+  const YARA_ROLLOUT_REQUEST_INDEX = '.xdr-defense-yara-rollout-requests';
+  const YARA_ROLLOUT_STATUS_INDEX = '.xdr-defense-yara-rollout-status';
+
+  const getPendingYaraRolloutCommand = async (context: any, agentId: string, policyId: string): Promise<string | undefined> => {
+    if (!agentId) {
+      return undefined;
+    }
+
+    const opensearchClient = context.core.opensearch.client.asInternalUser;
+
+    // YARA bundles in xdr-defense are always built for the global-default policy.
+    // Use that policy ID for both the rollout request lookup and the bundle
+    // command, regardless of the individual agent's enrolled policy ID.
+    const yaraBundlePolicyId = 'global-default';
+
+    try {
+      const requestResponse = await opensearchClient.get({
+        index: YARA_ROLLOUT_REQUEST_INDEX,
+        id: yaraBundlePolicyId
+      });
+      const requestSource = requestResponse.body?._source;
+      const targetBundleVersion = Number(requestSource?.bundle_version ?? 0);
+      if (!Number.isFinite(targetBundleVersion) || targetBundleVersion <= 0) {
+        return undefined;
+      }
+
+      let reportedBundleVersion = 0;
+      let rolloutState = '';
+      try {
+        const statusResponse = await opensearchClient.search({
+          index: YARA_ROLLOUT_STATUS_INDEX,
+          size: 1,
+          body: {
+            query: {
+              bool: {
+                must: [
+                  { term: { agent_id: agentId } },
+                  { term: { policy_id: yaraBundlePolicyId } }
+                ]
+              }
+            },
+            sort: [{ last_reported: { order: 'desc' } }]
+          }
+        });
+        const hit = statusResponse.body?.hits?.hits?.[0]?._source;
+        reportedBundleVersion = Number(hit?.bundle_version ?? 0);
+        rolloutState = String(hit?.state ?? '').toLowerCase();
+      } catch {
+        reportedBundleVersion = 0;
+        rolloutState = '';
+      }
+
+      if (reportedBundleVersion >= targetBundleVersion && (rolloutState === 'applied' || rolloutState === 'partial')) {
+        return undefined;
+      }
+
+      return `yara-rollout:${yaraBundlePolicyId}:${targetBundleVersion}`;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const collectPendingCommands = async (
+    context: any,
+    agentId: string,
+    agentVersion: string,
+    policyId: string
+  ): Promise<string[]> => {
+    const pendingCommands: string[] = [];
+
+    if (pendingUpgradeAgentIds.has(agentId)) {
+      let latestVersion: string | undefined;
+      try {
+        latestVersion = await getCachedLatestVersion();
+      } catch {
+        latestVersion = undefined;
+      }
+
+      if (latestVersion && agentVersion !== latestVersion) {
+        pendingCommands.push(`upgrade:${latestVersion}`);
+      } else {
+        pendingUpgradeAgentIds.delete(agentId);
+      }
+    }
+
+    const yaraCommand = await getPendingYaraRolloutCommand(context, agentId, policyId);
+    if (yaraCommand) {
+      pendingCommands.push(yaraCommand);
+    }
+
+    return pendingCommands;
+  };
+
   router.post(
     {
       path: '/api/xdr_manager/enrollment_tokens',
@@ -195,7 +288,7 @@ export function defineRoutes(
         }),
       },
     },
-    async (_context, request, response) => {
+    async (context, request, response) => {
       const selectedPolicy = policies.find((policy) => policy.id === request.body.policyId);
 
       if (!selectedPolicy) {
@@ -450,7 +543,7 @@ export function defineRoutes(
         authRequired: false,
       },
     },
-    async (_context, request, response) => {
+    async (context, request, response) => {
       const payload = request.body as ControlPlaneHeartbeatRequest;
 
       // Reject heartbeats from agents that were removed via the UI.
@@ -484,23 +577,19 @@ export function defineRoutes(
         version: payload.agent_version,
       });
 
-      // Build pending commands list.
-      const pendingCommands: string[] = [];
-      if (pendingUpgradeAgentIds.has(payload.agent_id)) {
-        // Fetch current latest version to tell the agent what to install
-        let latestVersion: string | undefined;
-        try {
-          latestVersion = await getCachedLatestVersion();
-        } catch {
-          // If we can't reach GitHub, skip upgrade command this cycle
-        }
-
-        if (latestVersion && payload.agent_version !== latestVersion) {
-          pendingCommands.push(`upgrade:${latestVersion}`);
-        } else {
-          // Agent already on latest version (or we couldn't determine it)
-          pendingUpgradeAgentIds.delete(payload.agent_id);
-        }
+      let pendingCommands: string[] = [];
+      try {
+        pendingCommands = await collectPendingCommands(
+          context,
+          payload.agent_id,
+          payload.agent_version,
+          payload.policy_id
+        );
+      } catch (err: any) {
+        // Keep heartbeat healthy even if command lookup fails.
+        // The agent polls commands frequently and will pick them up on recovery.
+        logger.warn(`heartbeat command lookup failed for agent ${payload.agent_id}: ${String(err?.message ?? err)}`);
+        pendingCommands = [];
       }
 
       const body: ControlPlaneHeartbeatResponse = {
@@ -529,7 +618,7 @@ export function defineRoutes(
         authRequired: false,
       },
     },
-    async (_context, request, response) => {
+    async (context, request, response) => {
       const { agent_id, agent_version } = request.query as {
         agent_id: string;
         agent_version: string;
@@ -541,22 +630,16 @@ export function defineRoutes(
         });
       }
 
-      const pendingCommands: string[] = [];
-      if (pendingUpgradeAgentIds.has(agent_id)) {
-        let latestVersion: string | undefined;
-        try {
-          latestVersion = await getCachedLatestVersion();
-        } catch {
-          // GitHub unreachable — skip this poll cycle
-        }
-
-        if (latestVersion && agent_version !== latestVersion) {
-          pendingCommands.push(`upgrade:${latestVersion}`);
-        } else {
-          // Agent is already on the latest version
-          pendingUpgradeAgentIds.delete(agent_id);
-        }
+      const repo = await agentRepoPromise;
+      let policyId = '';
+      try {
+        const agent = await repo.get<XdrAgentAttributes>(XDR_AGENT_SAVED_OBJECT_TYPE, agent_id);
+        policyId = String(agent.attributes.policyId ?? '');
+      } catch {
+        policyId = '';
       }
+
+      const pendingCommands = await collectPendingCommands(context, agent_id, agent_version, policyId);
 
       const body: ControlPlaneHeartbeatResponse = {
         message: 'commands polled',
