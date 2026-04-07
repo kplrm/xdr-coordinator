@@ -13,9 +13,11 @@
   ],
   "exclude": ["node_modules", "*/node_modules/"],
   "compilerOptions": {
+    "rootDir": "..",
     "outDir": "./target",
     "skipLibCheck": true,
     "esModuleInterop": true,
+    "ignoreDeprecations": "6.0",
     "typeRoots": [
       "../OpenSearch-Dashboards/node_modules/@types",
       "node_modules/@types"
