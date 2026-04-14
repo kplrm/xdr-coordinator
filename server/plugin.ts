@@ -96,19 +96,25 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
 
     // Install ISM policy (90-day retention) and index template for telemetry indices
     const opensearchClient = core.opensearch.client.asInternalUser;
-    installTelemetryIsmPolicy(opensearchClient, this.logger).catch((err) =>
-      this.logger.error(`xdr_manager: ISM policy install failed: ${err}`)
-    );
+    (async () => {
+      try {
+        await installTelemetryIsmPolicy(opensearchClient, this.logger);
+      } catch (err) {
+        this.logger.error(`xdr_manager: ISM policy install failed: ${err}`);
+      }
 
-    // Install ISM policy (90-day retention) and index template for security indices
-    installSecurityIsmPolicy(opensearchClient, this.logger).catch((err) =>
-      this.logger.error(`xdr_manager: security ISM policy install failed: ${err}`)
-    );
+      try {
+        await installSecurityIsmPolicy(opensearchClient, this.logger);
+      } catch (err) {
+        this.logger.error(`xdr_manager: security ISM policy install failed: ${err}`);
+      }
 
-    // Install ISM policy and index template for agent logs indices
-    installAgentLogsIsmPolicy(opensearchClient, this.logger).catch((err) =>
-      this.logger.error(`xdr_manager: logs ISM policy install failed: ${err}`)
-    );
+      try {
+        await installAgentLogsIsmPolicy(opensearchClient, this.logger);
+      } catch (err) {
+        this.logger.error(`xdr_manager: logs ISM policy install failed: ${err}`);
+      }
+    })().catch((err) => this.logger.error(`xdr_manager: unexpected ISM startup chain error: ${err}`));
 
     return {};
   }

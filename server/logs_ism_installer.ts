@@ -98,26 +98,24 @@ export async function installAgentLogsIsmPolicy(
   opensearchClient: any,
   logger: Logger
 ): Promise<void> {
+  const isPolicyAlreadyExistsError = (err: any): boolean => {
+    const statusCode = err?.statusCode ?? err?.meta?.statusCode;
+    const message = String(err?.message ?? err?.meta?.body?.error?.reason ?? '').toLowerCase();
+    return statusCode === 409 || message.includes('version conflict') || message.includes('already exists');
+  };
+
   try {
     await opensearchClient.transport.request({
-      method: 'GET',
+      method: 'PUT',
       path: `/_plugins/_ism/policies/${ISM_POLICY_ID}`,
+      body: buildIsmPolicy(),
     });
-    logger.debug(`xdr_manager: ISM policy [${ISM_POLICY_ID}] already exists`);
-  } catch (getErr: any) {
-    if (getErr?.statusCode === 404 || getErr?.meta?.statusCode === 404) {
-      try {
-        await opensearchClient.transport.request({
-          method: 'PUT',
-          path: `/_plugins/_ism/policies/${ISM_POLICY_ID}`,
-          body: buildIsmPolicy(),
-        });
-        logger.info(`xdr_manager: created ISM policy [${ISM_POLICY_ID}] (90-day retention)`);
-      } catch (createErr) {
-        logger.warn(`xdr_manager: failed to create logs ISM policy: ${createErr}`);
-      }
+    logger.info(`xdr_manager: upserted ISM policy [${ISM_POLICY_ID}] (90-day retention)`);
+  } catch (err: any) {
+    if (isPolicyAlreadyExistsError(err)) {
+      logger.debug(`xdr_manager: ISM policy [${ISM_POLICY_ID}] already exists/conflicted during startup`);
     } else {
-      logger.warn(`xdr_manager: failed to check logs ISM policy: ${getErr}`);
+      logger.warn(`xdr_manager: failed to upsert logs ISM policy: ${err}`);
     }
   }
 
