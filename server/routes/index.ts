@@ -25,21 +25,20 @@ import {
   XdrPolicy,
   XDR_AGENT_SAVED_OBJECT_TYPE,
   XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE,
+  XDR_POLICY_SAVED_OBJECT_TYPE,
 } from '../../common';
-import { defineTelemetryRoutes } from './telemetry';
 
-const policies: XdrPolicy[] = [
-  {
-    id: 'default-endpoint',
-    name: 'Default Endpoint Policy',
-    description: 'Baseline telemetry and malware prevention.',
-    malwareProtection: true,
-    fileIntegrityMonitoring: true,
-    autoUpgrade: false,
-    osqueryEnabled: false,
-    logLevel: 'standard',
-  },
-];
+const defaultPolicy: XdrPolicy = {
+  id: 'default-endpoint',
+  name: 'Default Endpoint Policy',
+  description: 'Default agent group.',
+};
+
+// Group labels are persisted; they never change endpoint protections.
+async function listPolicies(repo: ISavedObjectsRepository): Promise<XdrPolicy[]> {
+  const result = await repo.find<Omit<XdrPolicy, 'id'>>({ type: XDR_POLICY_SAVED_OBJECT_TYPE, perPage: 10000 });
+  return [defaultPolicy, ...result.saved_objects.map((item) => ({ id: item.id, ...item.attributes }))];
+}
 
 type XdrAgentAttributes = Omit<XdrAgent, 'id'>;
 
@@ -52,7 +51,7 @@ function toXdrAgent(so: { id: string; attributes: XdrAgentAttributes }): XdrAgen
     lastSeen: so.attributes.lastSeen,
     tags: so.attributes.tags,
     version: so.attributes.version,
-    enrollmentToken: so.attributes.enrollmentToken,
+    protection: so.attributes.protection,
   };
 }
 
@@ -65,14 +64,6 @@ type EnrollmentTokenAttributes = {
   consumedAgentId?: string;
   consumedHostname?: string;
 };
-
-// ── In-memory control-plane state ─────────────────────────────────────────
-// Agents removed via the UI can no longer send heartbeats or telemetry.
-const removedAgentIds = new Set<string>();
-
-// Agents that have a pending upgrade command (cleared once the agent reports
-// the expected version).
-const pendingUpgradeAgentIds = new Set<string>();
 
 // GitHub latest-release cache (refreshed at most once per minute).
 interface VersionCache {
@@ -109,6 +100,7 @@ function fetchLatestVersionFromGitHub(): Promise<string> {
         }
       });
     });
+    req.setTimeout(10000, () => req.destroy(new Error('GitHub release lookup timed out')));
     req.on('error', reject);
     req.end();
   });
@@ -125,10 +117,6 @@ async function getCachedLatestVersion(): Promise<string> {
 }
 
 const STALE_AGENT_THRESHOLD_MS = 5 * 60 * 1000;
-
-const isUnknownUnseenPlaceholder = (agent: XdrAgent): boolean => {
-  return agent.status === 'unseen' && (agent.name === 'unknown' || agent.name === 'localhost');
-};
 
 const deriveAgentStatus = (agent: XdrAgent, nowMs: number): AgentStatus => {
   if (agent.status === 'unseen') {
@@ -195,7 +183,7 @@ const authorizeAgentRequest = async (
     perPage: 1,
   });
 
-  if (!tokenSearchResult.saved_objects[0]) {
+  if (tokenSearchResult.saved_objects[0]?.attributes.token !== bearerToken) {
     return {
       ok: false,
       status: 'unauthorized',
@@ -218,22 +206,6 @@ const authorizeAgentRequest = async (
   }
 
   if (!agent.attributes.enrollmentToken || agent.attributes.enrollmentToken !== bearerToken) {
-    if (!agent.attributes.enrollmentToken) {
-      await repo.update<XdrAgentAttributes>(XDR_AGENT_SAVED_OBJECT_TYPE, agentId, {
-        enrollmentToken: bearerToken,
-      });
-      return {
-        ok: true,
-        agent: {
-          ...agent,
-          attributes: {
-            ...agent.attributes,
-            enrollmentToken: bearerToken,
-          },
-        },
-      };
-    }
-
     return {
       ok: false,
       status: 'unauthorized',
@@ -247,15 +219,7 @@ const authorizeAgentRequest = async (
 const policyRequestSchema = schema.object({
   name: schema.string({ minLength: 1 }),
   description: schema.string({ minLength: 1 }),
-  malwareProtection: schema.boolean(),
-  fileIntegrityMonitoring: schema.boolean(),
-  autoUpgrade: schema.boolean(),
-  osqueryEnabled: schema.boolean(),
-  logLevel: schema.oneOf([
-    schema.literal('minimal'),
-    schema.literal('standard'),
-    schema.literal('verbose'),
-  ]),
+
 });
 
 export function defineRoutes(
@@ -263,97 +227,16 @@ export function defineRoutes(
   logger: Logger,
   agentRepoPromise: Promise<ISavedObjectsRepository>
 ) {
-  const YARA_ROLLOUT_REQUEST_INDEX = '.xdr-defense-yara-rollout-requests';
-  const YARA_ROLLOUT_STATUS_INDEX = '.xdr-defense-yara-rollout-status';
-
-  const getPendingYaraRolloutCommand = async (context: any, agentId: string, policyId: string): Promise<string | undefined> => {
-    if (!agentId) {
-      return undefined;
+  const collectPendingCommands = async (agentId: string, agentVersion: string): Promise<string[]> => {
+    const repo = await agentRepoPromise;
+    const agent = await repo.get<XdrAgentAttributes>(XDR_AGENT_SAVED_OBJECT_TYPE, agentId);
+    const target = agent.attributes.pendingUpgradeVersion;
+    if (!target) return [];
+    if (target === agentVersion) {
+      await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, agentId, { pendingUpgradeVersion: '' });
+      return [];
     }
-
-    const opensearchClient = context.core.opensearch.client.asInternalUser;
-
-    // YARA bundles in xdr-defense are always built for the global-default policy.
-    // Use that policy ID for both the rollout request lookup and the bundle
-    // command, regardless of the individual agent's enrolled policy ID.
-    const yaraBundlePolicyId = 'global-default';
-
-    try {
-      const requestResponse = await opensearchClient.get({
-        index: YARA_ROLLOUT_REQUEST_INDEX,
-        id: yaraBundlePolicyId
-      });
-      const requestSource = requestResponse.body?._source;
-      const targetBundleVersion = Number(requestSource?.bundle_version ?? 0);
-      if (!Number.isFinite(targetBundleVersion) || targetBundleVersion <= 0) {
-        return undefined;
-      }
-
-      let reportedBundleVersion = 0;
-      let rolloutState = '';
-      try {
-        const statusResponse = await opensearchClient.search({
-          index: YARA_ROLLOUT_STATUS_INDEX,
-          size: 1,
-          body: {
-            query: {
-              bool: {
-                must: [
-                  { term: { agent_id: agentId } },
-                  { term: { policy_id: yaraBundlePolicyId } }
-                ]
-              }
-            },
-            sort: [{ last_reported: { order: 'desc' } }]
-          }
-        });
-        const hit = statusResponse.body?.hits?.hits?.[0]?._source;
-        reportedBundleVersion = Number(hit?.bundle_version ?? 0);
-        rolloutState = String(hit?.state ?? '').toLowerCase();
-      } catch {
-        reportedBundleVersion = 0;
-        rolloutState = '';
-      }
-
-      if (reportedBundleVersion >= targetBundleVersion && (rolloutState === 'applied' || rolloutState === 'partial')) {
-        return undefined;
-      }
-
-      return `yara-rollout:${yaraBundlePolicyId}:${targetBundleVersion}`;
-    } catch {
-      return undefined;
-    }
-  };
-
-  const collectPendingCommands = async (
-    context: any,
-    agentId: string,
-    agentVersion: string,
-    policyId: string
-  ): Promise<string[]> => {
-    const pendingCommands: string[] = [];
-
-    if (pendingUpgradeAgentIds.has(agentId)) {
-      let latestVersion: string | undefined;
-      try {
-        latestVersion = await getCachedLatestVersion();
-      } catch {
-        latestVersion = undefined;
-      }
-
-      if (latestVersion && agentVersion !== latestVersion) {
-        pendingCommands.push(`upgrade:${latestVersion}`);
-      } else {
-        pendingUpgradeAgentIds.delete(agentId);
-      }
-    }
-
-    const yaraCommand = await getPendingYaraRolloutCommand(context, agentId, policyId);
-    if (yaraCommand) {
-      pendingCommands.push(yaraCommand);
-    }
-
-    return pendingCommands;
+    return [`upgrade:${target}`];
   };
 
   router.post(
@@ -368,6 +251,7 @@ export function defineRoutes(
     },
     async (context, request, response) => {
       const payload = request.body as GenerateEnrollmentTokenRequest;
+      const policies = await listPolicies(await agentRepoPromise);
       const selectedPolicy = policies.find((policy) => policy.id === request.body.policyId);
 
       if (!selectedPolicy) {
@@ -419,7 +303,7 @@ export function defineRoutes(
         perPage: 1,
       });
       const tokenSO = result.saved_objects[0] ?? null;
-      if (!tokenSO) {
+      if (!tokenSO || tokenSO.attributes.token !== request.params.token) {
         return response.notFound({
           body: `Enrollment token [${request.params.token}] not found`,
         });
@@ -462,7 +346,7 @@ export function defineRoutes(
         perPage: 1,
       });
       const tokenSO = result.saved_objects[0] ?? null;
-      if (!tokenSO) {
+      if (!tokenSO || tokenSO.attributes.token !== request.params.token) {
         return response.notFound({
           body: `Enrollment token not found`,
         });
@@ -499,7 +383,7 @@ export function defineRoutes(
       });
 
       const tokenSO = result.saved_objects[0] ?? null;
-      if (!tokenSO) {
+      if (!tokenSO || tokenSO.attributes.token !== request.params.token) {
         return response.notFound({
           body: `Enrollment token not found`,
         });
@@ -558,7 +442,7 @@ export function defineRoutes(
         perPage: 1,
       });
       const tokenSO = tokenSearchResult.saved_objects[0] ?? null;
-      if (!tokenSO) {
+      if (!tokenSO || tokenSO.attributes.token !== bearerToken) {
         return response.unauthorized({
           body: {
             message: 'Enrollment token is invalid',
@@ -567,6 +451,9 @@ export function defineRoutes(
       }
 
       const payload = request.body as ControlPlaneEnrollRequest;
+      if (tokenSO.attributes.consumedAgentId && tokenSO.attributes.consumedAgentId !== payload.agent_id) {
+        return response.unauthorized({ body: { message: 'Enrollment token is already assigned to another agent' } });
+      }
       if (tokenSO.attributes.policyId !== payload.policy_id) {
         return response.badRequest({
           body: {
@@ -575,6 +462,7 @@ export function defineRoutes(
         });
       }
 
+      const policies = await listPolicies(await agentRepoPromise);
       const selectedPolicy = policies.find((policy) => policy.id === payload.policy_id);
       if (!selectedPolicy) {
         return response.badRequest({
@@ -608,22 +496,6 @@ export function defineRoutes(
       if (existingAgent) {
         await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, payload.agent_id, agentAttrs);
       } else {
-        // Check for an "unseen" placeholder agent for this policy
-        const placeholders = await repo.find<XdrAgentAttributes>({
-          type: XDR_AGENT_SAVED_OBJECT_TYPE,
-          perPage: 10000,
-        });
-        const placeholder = placeholders.saved_objects.find(
-          (so) =>
-            isUnknownUnseenPlaceholder(toXdrAgent(so)) &&
-            so.attributes.policyId === payload.policy_id
-        );
-
-        if (placeholder) {
-          // Replace the placeholder with the real agent
-          await repo.delete(XDR_AGENT_SAVED_OBJECT_TYPE, placeholder.id);
-        }
-
         await repo.create<XdrAgentAttributes>(XDR_AGENT_SAVED_OBJECT_TYPE, agentAttrs, {
           id: payload.agent_id,
         });
@@ -633,10 +505,6 @@ export function defineRoutes(
         enrollment_id: payload.agent_id,
         message: `enrolled agent ${payload.hostname}`,
       };
-
-      // If this agent was previously removed via the UI, clear it from the
-      // blocklist so that its heartbeats and telemetry are accepted again.
-      removedAgentIds.delete(payload.agent_id);
 
       // Mark token as consumed in saved objects
       if (!tokenSO.attributes.consumedAt) {
@@ -662,6 +530,12 @@ export function defineRoutes(
           policy_id: schema.string({ minLength: 1 }),
           tags: schema.arrayOf(schema.string()),
           agent_version: schema.string({ minLength: 1 }),
+          protection: schema.maybe(schema.object({
+            rule_source: schema.string(), rule_version: schema.string(),
+            rule_count: schema.number({ min: 0 }), mode: schema.string(),
+            platform: schema.string(), rules_sha256: schema.string(),
+            health: schema.maybe(schema.recordOf(schema.string(), schema.string())),
+          })),
         }),
       },
       options: {
@@ -687,30 +561,20 @@ export function defineRoutes(
         });
       }
 
-      // Reject heartbeats from agents that were removed via the UI.
-      if (removedAgentIds.has(payload.agent_id)) {
-        return response.unauthorized({
-          body: { message: `Agent [${payload.agent_id}] has been removed` },
-        });
-      }
-
       await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, payload.agent_id, {
         name: payload.hostname,
-        policyId: payload.policy_id,
-        status: 'healthy' as AgentStatus,
+        status: Object.values(payload.protection?.health ?? {}).some((value) => /^(degraded|failed|stopped|unknown|disabled)/.test(value)) ? 'degraded' : 'healthy',
         lastSeen: new Date().toISOString(),
         tags: payload.tags,
         version: payload.agent_version,
-        enrollmentToken: auth.agent.attributes.enrollmentToken,
+        ...(payload.protection ? { protection: payload.protection } : {}),
       });
 
       let pendingCommands: string[] = [];
       try {
         pendingCommands = await collectPendingCommands(
-          context,
           payload.agent_id,
-          payload.agent_version,
-          payload.policy_id
+          payload.agent_version
         );
       } catch (err: any) {
         // Keep heartbeat healthy even if command lookup fails.
@@ -768,15 +632,7 @@ export function defineRoutes(
         });
       }
 
-      if (removedAgentIds.has(agent_id)) {
-        return response.unauthorized({
-          body: { message: `Agent [${agent_id}] has been removed` },
-        });
-      }
-
-      const policyId = String(auth.agent.attributes.policyId ?? '');
-
-      const pendingCommands = await collectPendingCommands(context, agent_id, agent_version, policyId);
+      const pendingCommands = await collectPendingCommands(agent_id, agent_version);
 
       const body: ControlPlaneHeartbeatResponse = {
         message: 'commands polled',
@@ -819,56 +675,11 @@ export function defineRoutes(
             status: deriveAgentStatus(agent, nowMs),
           };
         }),
-        policies,
+        policies: await listPolicies(repo),
         latestVersion,
       };
 
       return response.ok({ body });
-    }
-  );
-
-  router.post(
-    {
-      path: '/api/xdr_manager/agents/enroll',
-      validate: {
-        body: schema.object({
-          hostname: schema.string({ minLength: 1 }),
-          policyId: schema.string({ minLength: 1 }),
-          tags: schema.maybe(schema.arrayOf(schema.string())),
-        }),
-      },
-    },
-    async (_context, request, response) => {
-      const selectedPolicy = policies.find((policy) => policy.id === request.body.policyId);
-
-      if (!selectedPolicy) {
-        return response.badRequest({
-          body: `Unknown policy [${request.body.policyId}]`,
-        });
-      }
-
-      const repo = await agentRepoPromise;
-      const agentId = `agent-${Date.now()}`;
-      const attrs: XdrAgentAttributes = {
-        name: 'unknown',
-        policyId: request.body.policyId,
-        status: 'unseen',
-        lastSeen: new Date().toISOString(),
-        tags: request.body.tags ?? [],
-        version: '1.0.0',
-      };
-
-      await repo.create<XdrAgentAttributes>(XDR_AGENT_SAVED_OBJECT_TYPE, attrs, {
-        id: agentId,
-      });
-
-      const newAgent: XdrAgent = { id: agentId, ...attrs };
-
-      return response.ok({
-        body: {
-          agent: newAgent,
-        },
-      });
     }
   );
 
@@ -880,7 +691,7 @@ export function defineRoutes(
     async (_context, _request, response) => {
       return response.ok({
         body: {
-          policies,
+          policies: await listPolicies(await agentRepoPromise),
         },
       });
     }
@@ -895,6 +706,8 @@ export function defineRoutes(
     },
     async (_context, request, response) => {
       const payload = request.body as UpsertPolicyRequest;
+      const repo = await agentRepoPromise;
+      const policies = await listPolicies(repo);
       const baseId = toPolicyId(payload.name);
       let id = baseId;
       let count = 1;
@@ -907,7 +720,7 @@ export function defineRoutes(
         id,
         ...payload,
       };
-      policies.unshift(newPolicy);
+      await repo.create(XDR_POLICY_SAVED_OBJECT_TYPE, payload, { id });
 
       const body: UpsertPolicyResponse = {
         policy: newPolicy,
@@ -928,6 +741,8 @@ export function defineRoutes(
       },
     },
     async (_context, request, response) => {
+      const repo = await agentRepoPromise;
+      const policies = await listPolicies(repo);
       const policy = policies.find((item) => item.id === request.params.id);
 
       if (!policy) {
@@ -936,14 +751,12 @@ export function defineRoutes(
         });
       }
 
+      if (policy.id === defaultPolicy.id) {
+        return response.badRequest({ body: 'The default group cannot be edited' });
+      }
       const payload = request.body as UpsertPolicyRequest;
-      policy.name = payload.name;
-      policy.description = payload.description;
-      policy.malwareProtection = payload.malwareProtection;
-      policy.fileIntegrityMonitoring = payload.fileIntegrityMonitoring;
-      policy.autoUpgrade = payload.autoUpgrade;
-      policy.osqueryEnabled = payload.osqueryEnabled;
-      policy.logLevel = payload.logLevel;
+      await repo.update(XDR_POLICY_SAVED_OBJECT_TYPE, policy.id, payload);
+      Object.assign(policy, payload);
 
       const body: UpsertPolicyResponse = {
         policy,
@@ -963,6 +776,8 @@ export function defineRoutes(
       },
     },
     async (_context, request, response) => {
+      const policies = await listPolicies(await agentRepoPromise);
+      if (request.params.id === defaultPolicy.id) return response.badRequest({ body: 'The default group cannot be deleted' });
       const policyIndex = policies.findIndex((item) => item.id === request.params.id);
 
       if (policyIndex === -1) {
@@ -986,7 +801,12 @@ export function defineRoutes(
         });
       }
 
-      const [deletedPolicy] = policies.splice(policyIndex, 1);
+      const tokens = await agentRepo.find<EnrollmentTokenAttributes>({ type: XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE, perPage: 10000 });
+      if (tokens.saved_objects.some((token) => token.attributes.policyId === request.params.id)) {
+        return response.badRequest({ body: 'Revoke enrollment tokens assigned to this group first' });
+      }
+      const deletedPolicy = policies[policyIndex];
+      await agentRepo.delete(XDR_POLICY_SAVED_OBJECT_TYPE, deletedPolicy.id);
 
       return response.ok({
         body: {
@@ -1028,9 +848,8 @@ export function defineRoutes(
         throw err;
       }
 
-      // Mark the agent as having a pending upgrade. The upgrade:VERSION
-      // command will be delivered on the next heartbeat.
-      pendingUpgradeAgentIds.add(request.params.id);
+      const targetVersion = await getCachedLatestVersion();
+      await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, request.params.id, { pendingUpgradeVersion: targetVersion });
 
       const agent: XdrAgent = toXdrAgent(existing);
 
@@ -1049,28 +868,12 @@ export function defineRoutes(
   const XDR_TELEMETRY_INDEX_PREFIX = '.xdr-agent-telemetry';
   const XDR_SECURITY_INDEX_PREFIX = '.xdr-agent-security';
   const XDR_LOGS_INDEX_PREFIX = '.xdr-agent-logs';
-  const SECURITY_MODULE_PREFIXES = ['detection.', 'prevention.', 'response.'];
   const MAX_EVENTS_PER_INGEST_REQUEST = 1000;
   const BULK_INDEX_CHUNK_SIZE = 250;
-
-  const isSecurityEvent = (event: ControlPlaneTelemetryRequest['events'][number]): boolean => {
-    const eventModule = event['event.module'] ?? '';
-
-    // Injection telemetry uses alert/intrusion_detection fields, but still belongs on telemetry endpoint.
-    if (eventModule === 'telemetry.injection') {
-      return false;
-    }
-
-    return (
-      event['event.kind'] === 'alert' ||
-      event['event.category'] === 'intrusion_detection' ||
-      SECURITY_MODULE_PREFIXES.some((prefix) => eventModule.startsWith(prefix))
-    );
-  };
-
-  const isAgentLogEvent = (event: ControlPlaneTelemetryRequest['events'][number]): boolean => {
-    return event['event.type'] === 'agent.log' || event['event.module'] === 'agent.logger';
-  };
+  const isSecurityEvent = (event: ControlPlaneTelemetryRequest['events'][number]) =>
+    event['event.kind'] === 'alert' || /^(detection|prevention|response)\./.test(event['event.module']);
+  const isAgentLogEvent = (event: ControlPlaneTelemetryRequest['events'][number]) =>
+    event['event.type'] === 'agent.log' || event['event.module'] === 'agent.logger';
 
   const buildDailyIndexName = (prefix: string): string => {
     const today = new Date().toISOString().slice(0, 10);
@@ -1078,7 +881,7 @@ export function defineRoutes(
   };
 
   const telemetryEventSchema = schema.object({
-    id: schema.string(),
+    id: schema.string({ minLength: 1 }),
     '@timestamp': schema.string(),
     'event.type': schema.string(),
     'event.category': schema.string(),
@@ -1106,12 +909,6 @@ export function defineRoutes(
     }
 
     const opensearchClient = context.core.opensearch.client.asInternalUser;
-    const indexExists = await opensearchClient.indices.exists({ index: indexName });
-    if (!indexExists.body) {
-      await opensearchClient.indices.create({ index: indexName });
-      logger.info(`Created ${kind} index [${indexName}]`);
-    }
-
     // Send bulk requests in bounded chunks to avoid creating one very large payload.
     for (let start = 0; start < events.length; start += BULK_INDEX_CHUNK_SIZE) {
       const end = Math.min(start + BULK_INDEX_CHUNK_SIZE, events.length);
@@ -1119,7 +916,7 @@ export function defineRoutes(
 
       for (let i = start; i < end; i++) {
         const evt = events[i];
-        bulkBody.push({ index: { _index: indexName, _id: evt.id } });
+        bulkBody.push({ index: { _index: indexName, _id: `${payload.agent_id}:${evt.id}` } });
         bulkBody.push({
           ...evt,
           'agent.id': payload.agent_id,
@@ -1133,212 +930,66 @@ export function defineRoutes(
           const action = item.index || item.create || item.update || item.delete;
           return action?.error;
         });
-        logger.warn(
-          `Bulk index to [${indexName}]: ${failedItems.length}/${end - start} ${kind} events failed`
-        );
+        throw new Error(`Bulk index to [${indexName}]: ${failedItems.length}/${end - start} ${kind} events failed`);
       }
     }
   };
 
-  router.post(
-    {
-      path: '/api/v1/agents/telemetry',
-      validate: {
-        body: schema.object({
-          agent_id: schema.string({ minLength: 1 }),
-          events: schema.arrayOf(telemetryEventSchema, { minSize: 1, maxSize: MAX_EVENTS_PER_INGEST_REQUEST }),
-        }),
-      },
-      options: {
-        authRequired: false,
-      },
-    },
-    async (context, request, response) => {
+  const topics = [
+    { path: '/api/v1/agents/telemetry', kind: 'telemetry' as const, prefix: XDR_TELEMETRY_INDEX_PREFIX,
+      accepts: (event: ControlPlaneTelemetryRequest['events'][number]) => !isSecurityEvent(event) && !isAgentLogEvent(event) },
+    { path: '/api/v1/agents/security', kind: 'security' as const, prefix: XDR_SECURITY_INDEX_PREFIX, accepts: isSecurityEvent },
+    { path: '/api/v1/agents/logs', kind: 'logs' as const, prefix: XDR_LOGS_INDEX_PREFIX, accepts: isAgentLogEvent },
+  ];
+  for (const topic of topics) {
+    router.post({
+      path: topic.path,
+      validate: { body: schema.object({
+        agent_id: schema.string({ minLength: 1 }),
+        events: schema.arrayOf(telemetryEventSchema, { minSize: 1, maxSize: MAX_EVENTS_PER_INGEST_REQUEST }),
+      }) },
+      options: { authRequired: false, body: { maxBytes: 10 * 1024 * 1024 } },
+    }, async (context, request, response) => {
       const payload = request.body as ControlPlaneTelemetryRequest;
       const repo = await agentRepoPromise;
       const auth = await authorizeAgentRequest(repo, request.headers.authorization, payload.agent_id);
       if (!auth.ok) {
-        if (auth.status === 'not-found') {
-          return response.notFound({ body: { message: auth.message } });
-        }
-        return response.unauthorized({ body: { message: auth.message } });
+        return auth.status === 'not-found'
+          ? response.notFound({ body: { message: auth.message } })
+          : response.unauthorized({ body: { message: auth.message } });
       }
-
-      // Reject telemetry from agents that were removed via the UI.
-      if (removedAgentIds.has(payload.agent_id)) {
-        return response.unauthorized({
-          body: { message: `Agent [${payload.agent_id}] has been removed` },
-        });
+      if (!payload.events.every(topic.accepts)) {
+        return response.badRequest({ body: { message: `Events do not belong to ${topic.kind} endpoint` } });
       }
-
-      const securityCount = payload.events.filter((evt) => isSecurityEvent(evt)).length;
-      if (securityCount > 0) {
-        return response.badRequest({
-          body: {
-            message: `${securityCount} security-classified events received on telemetry endpoint; send them to /api/v1/agents/security`,
-          },
-        });
-      }
-
       try {
-        const telemetryIndexName = buildDailyIndexName(XDR_TELEMETRY_INDEX_PREFIX);
-        await indexBatch(context, payload, payload.events, telemetryIndexName, 'telemetry');
-
-        const indexed = payload.events.length;
-        const message = `${indexed} events indexed into ${telemetryIndexName}`;
-        logger.debug(`Indexed ${indexed} telemetry events from agent [${payload.agent_id}]`);
-
+        const indexName = buildDailyIndexName(topic.prefix);
+        await indexBatch(context, payload, payload.events, indexName, topic.kind);
         const body: ControlPlaneTelemetryResponse = {
-          indexed,
-          telemetry_indexed: indexed,
-          message,
+          indexed: payload.events.length,
+          message: `${payload.events.length} events indexed into ${indexName}`,
         };
-
         return response.ok({ body });
       } catch (err) {
-        logger.error(`Failed to index telemetry events: ${err}`);
-        return response.customError({
-          statusCode: 502,
-          body: {
-            message: `Failed to index telemetry events: ${err}`,
-          },
-        });
+        logger.error(`Failed to index ${topic.kind} events: ${err}`);
+        // Stable event IDs make retrying a partially accepted batch safe.
+        return response.customError({ statusCode: 502, body: { message: `Failed to index ${topic.kind} events` } });
       }
-    }
-  );
+    });
+  }
 
-  router.post(
-    {
-      path: '/api/v1/agents/security',
-      validate: {
-        body: schema.object({
-          agent_id: schema.string({ minLength: 1 }),
-          events: schema.arrayOf(telemetryEventSchema, { minSize: 1, maxSize: MAX_EVENTS_PER_INGEST_REQUEST }),
-        }),
-      },
-      options: {
-        authRequired: false,
-      },
-    },
-    async (context, request, response) => {
-      const payload = request.body as ControlPlaneTelemetryRequest;
-
-      const repo = await agentRepoPromise;
-      const auth = await authorizeAgentRequest(repo, request.headers.authorization, payload.agent_id);
-      if (!auth.ok) {
-        if (auth.status === 'not-found') {
-          return response.notFound({ body: { message: auth.message } });
-        }
-        return response.unauthorized({ body: { message: auth.message } });
-      }
-
-      if (removedAgentIds.has(payload.agent_id)) {
-        return response.unauthorized({
-          body: { message: `Agent [${payload.agent_id}] has been removed` },
-        });
-      }
-
-      const nonSecurityCount = payload.events.filter((evt) => !isSecurityEvent(evt)).length;
-      if (nonSecurityCount > 0) {
-        return response.badRequest({
-          body: {
-            message: `${nonSecurityCount} non-security events received on security endpoint; send them to /api/v1/agents/telemetry`,
-          },
-        });
-      }
-
-      try {
-        const securityIndexName = buildDailyIndexName(XDR_SECURITY_INDEX_PREFIX);
-        await indexBatch(context, payload, payload.events, securityIndexName, 'security');
-
-        const indexed = payload.events.length;
-        const body: ControlPlaneTelemetryResponse = {
-          indexed,
-          security_indexed: indexed,
-          message: `${indexed} events indexed into ${securityIndexName}`,
-        };
-
-        logger.debug(`Indexed ${indexed} security events from agent [${payload.agent_id}]`);
-        return response.ok({ body });
-      } catch (err) {
-        logger.error(`Failed to index security events: ${err}`);
-        return response.customError({
-          statusCode: 502,
-          body: {
-            message: `Failed to index security events: ${err}`,
-          },
-        });
-      }
-    }
-  );
-
-  router.post(
-    {
-      path: '/api/v1/agents/logs',
-      validate: {
-        body: schema.object({
-          agent_id: schema.string({ minLength: 1 }),
-          events: schema.arrayOf(telemetryEventSchema, { minSize: 1, maxSize: MAX_EVENTS_PER_INGEST_REQUEST }),
-        }),
-      },
-      options: {
-        authRequired: false,
-      },
-    },
-    async (context, request, response) => {
-      const payload = request.body as ControlPlaneTelemetryRequest;
-
-      const repo = await agentRepoPromise;
-      const auth = await authorizeAgentRequest(repo, request.headers.authorization, payload.agent_id);
-      if (!auth.ok) {
-        if (auth.status === 'not-found') {
-          return response.notFound({ body: { message: auth.message } });
-        }
-        return response.unauthorized({ body: { message: auth.message } });
-      }
-
-      if (removedAgentIds.has(payload.agent_id)) {
-        return response.unauthorized({
-          body: { message: `Agent [${payload.agent_id}] has been removed` },
-        });
-      }
-
-      const nonLogCount = payload.events.filter((evt) => !isAgentLogEvent(evt)).length;
-      if (nonLogCount > 0) {
-        return response.badRequest({
-          body: {
-            message: `${nonLogCount} non-log events received on logs endpoint; send telemetry to /api/v1/agents/telemetry and security alerts to /api/v1/agents/security`,
-          },
-        });
-      }
-
-      try {
-        const logsIndexName = buildDailyIndexName(XDR_LOGS_INDEX_PREFIX);
-        await indexBatch(context, payload, payload.events, logsIndexName, 'logs');
-
-        const indexed = payload.events.length;
-        const body: ControlPlaneTelemetryResponse = {
-          indexed,
-          message: `${indexed} events indexed into ${logsIndexName}`,
-        };
-
-        logger.debug(`Indexed ${indexed} agent logs from agent [${payload.agent_id}]`);
-        return response.ok({ body });
-      } catch (err) {
-        logger.error(`Failed to index log events: ${err}`);
-        return response.customError({
-          statusCode: 502,
-          body: {
-            message: `Failed to index log events: ${err}`,
-          },
-        });
-      }
-    }
-  );
+  router.get({ path: '/api/xdr_manager/protections', validate: false }, async (_context, _request, response) => {
+    const repo = await agentRepoPromise;
+    const result = await repo.find<XdrAgentAttributes>({ type: XDR_AGENT_SAVED_OBJECT_TYPE, perPage: 10000 });
+    const agents = result.saved_objects.map((item) => {
+      const agent = toXdrAgent(item);
+      return { agent_id: agent.id, name: agent.name, status: deriveAgentStatus(agent, Date.now()),
+        version: agent.version, last_seen: agent.lastSeen, protection: agent.protection };
+    });
+    return response.ok({ body: { agents, total: agents.length } });
+  });
 
   // ── DELETE /api/xdr_manager/agents/{id} ────────────────────────────────
-  // Removes a known agent: deletes its saved object and adds its ID to the
-  // in-memory blocklist so further heartbeats and telemetry are rejected.
+  // Removes the agent and revokes its enrollment token.
 
   router.delete(
     {
@@ -1362,10 +1013,13 @@ export function defineRoutes(
         // Already gone — still add to blocklist below
       }
 
-      // Add to blocklist so further heartbeats / telemetry are rejected even
-      // if another process re-creates the object.
-      removedAgentIds.add(agentId);
-      pendingUpgradeAgentIds.delete(agentId);
+      // Revoke its enrollment credential so an uninstalled agent cannot silently rejoin.
+      const tokens = await repo.find<EnrollmentTokenAttributes>({ type: XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE, perPage: 10000 });
+      for (const token of tokens.saved_objects) {
+        if (token.attributes.consumedAgentId === request.params.id) {
+          await repo.delete(XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE, token.id);
+        }
+      }
 
       const body: RemoveAgentResponse = {
         removedAgentId: agentId,
@@ -1385,6 +1039,7 @@ export function defineRoutes(
       validate: false,
     },
     async (_context, _request, response) => {
+      const policies = await listPolicies(await agentRepoPromise);
       const policyNameById = Object.fromEntries(
         policies.map((policy) => [policy.id, policy.name])
       );
@@ -1440,6 +1095,5 @@ export function defineRoutes(
     }
   );
 
-  // Register telemetry dashboard query routes (Host / Process / Network tabs)
-  defineTelemetryRoutes(router, logger);
+
 }

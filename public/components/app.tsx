@@ -26,7 +26,6 @@ import {
   EuiPanel,
   EuiSelect,
   EuiSpacer,
-  EuiSwitch,
   EuiTab,
   EuiTabs,
   EuiText,
@@ -41,7 +40,6 @@ import {
   GenerateEnrollmentTokenResponse,
   ListAgentsResponse,
   ListEnrollmentTokensResponse,
-  PolicyLogLevel,
   RunActionResponse,
   UpsertPolicyResponse,
   XdrAction,
@@ -140,11 +138,6 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
   const [editingPolicyId, setEditingPolicyId] = useState<string | null>(null);
   const [policyNameInput, setPolicyNameInput] = useState('');
   const [policyDescriptionInput, setPolicyDescriptionInput] = useState('');
-  const [policyLogLevel, setPolicyLogLevel] = useState<PolicyLogLevel>('standard');
-  const [policyMalwareProtection, setPolicyMalwareProtection] = useState(true);
-  const [policyFileIntegrity, setPolicyFileIntegrity] = useState(true);
-  const [policyAutoUpgrade, setPolicyAutoUpgrade] = useState(false);
-  const [policyOsqueryEnabled, setPolicyOsqueryEnabled] = useState(false);
   const [isSavingPolicy, setIsSavingPolicy] = useState(false);
   const [activeTab, setActiveTab] = useState<'agents' | 'policies' | 'tokens'>('agents');
 
@@ -447,11 +440,6 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     setEditingPolicyId(null);
     setPolicyNameInput('');
     setPolicyDescriptionInput('');
-    setPolicyLogLevel('standard');
-    setPolicyMalwareProtection(true);
-    setPolicyFileIntegrity(true);
-    setPolicyAutoUpgrade(false);
-    setPolicyOsqueryEnabled(false);
     setIsPolicyFlyoutOpen(true);
   }, []);
 
@@ -459,11 +447,6 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     setEditingPolicyId(policy.id);
     setPolicyNameInput(policy.name);
     setPolicyDescriptionInput(policy.description);
-    setPolicyLogLevel(policy.logLevel);
-    setPolicyMalwareProtection(policy.malwareProtection);
-    setPolicyFileIntegrity(policy.fileIntegrityMonitoring);
-    setPolicyAutoUpgrade(policy.autoUpgrade);
-    setPolicyOsqueryEnabled(policy.osqueryEnabled);
     setIsPolicyFlyoutOpen(true);
   }, []);
 
@@ -480,11 +463,6 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     const body = JSON.stringify({
       name: policyNameInput.trim(),
       description: policyDescriptionInput.trim(),
-      logLevel: policyLogLevel,
-      malwareProtection: policyMalwareProtection,
-      fileIntegrityMonitoring: policyFileIntegrity,
-      autoUpgrade: policyAutoUpgrade,
-      osqueryEnabled: policyOsqueryEnabled,
     });
 
     setIsSavingPolicy(true);
@@ -522,13 +500,8 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     http,
     loadData,
     notifications.toasts,
-    policyAutoUpgrade,
     policyDescriptionInput,
-    policyFileIntegrity,
-    policyLogLevel,
-    policyMalwareProtection,
     policyNameInput,
-    policyOsqueryEnabled,
   ]);
 
   const deletePolicy = useCallback(
@@ -741,24 +714,6 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       name: i18n.translate('xdrCoordinator.policyColumn.description', { defaultMessage: 'Description' }),
     },
     {
-      field: 'logLevel',
-      name: i18n.translate('xdrCoordinator.policyColumn.logLevel', { defaultMessage: 'Log level' }),
-      render: (value: PolicyLogLevel) => <EuiBadge>{value}</EuiBadge>,
-    },
-    {
-      name: i18n.translate('xdrCoordinator.policyColumn.protection', { defaultMessage: 'Protection controls' }),
-      render: (policy: XdrPolicy) => {
-        const enabledFeatures = [
-          policy.malwareProtection ? 'Malware' : null,
-          policy.fileIntegrityMonitoring ? 'FIM' : null,
-          policy.osqueryEnabled ? 'Osquery' : null,
-          policy.autoUpgrade ? 'Auto upgrade' : null,
-        ].filter(Boolean);
-
-        return enabledFeatures.length > 0 ? enabledFeatures.join(', ') : 'None';
-      },
-    },
-    {
       name: i18n.translate('xdrCoordinator.policyColumn.assignedAgents', {
         defaultMessage: 'Assigned agents',
       }),
@@ -770,12 +725,12 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       render: (policy: XdrPolicy) => (
         <EuiFlexGroup gutterSize="s" responsive={false}>
           <EuiFlexItem grow={false}>
-            <EuiButtonEmpty size="xs" onClick={() => openEditPolicyFlyout(policy)}>
+            <EuiButtonEmpty size="xs" onClick={() => openEditPolicyFlyout(policy)} isDisabled={policy.id === 'default-endpoint'}>
               {i18n.translate('xdrCoordinator.policyEdit', { defaultMessage: 'Edit' })}
             </EuiButtonEmpty>
           </EuiFlexItem>
           <EuiFlexItem grow={false}>
-            <EuiButtonEmpty size="xs" color="danger" onClick={() => deletePolicy(policy)}>
+            <EuiButtonEmpty size="xs" color="danger" onClick={() => deletePolicy(policy)} isDisabled={policy.id === 'default-endpoint'}>
               {i18n.translate('xdrCoordinator.policyDelete', { defaultMessage: 'Delete' })}
             </EuiButtonEmpty>
           </EuiFlexItem>
@@ -1094,7 +1049,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
                 <p>
                   {i18n.translate('xdrCoordinator.policySectionDescription', {
                     defaultMessage:
-                      'Define endpoint behavior profiles: protection controls, telemetry verbosity, and upgrade posture.',
+                      'Group agents with policy labels. Protection content is included in agent releases.',
                   })}
                 </p>
               </EuiText>
@@ -1413,59 +1368,10 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
                     <EuiFieldText
                       value={policyDescriptionInput}
                       onChange={(event) => setPolicyDescriptionInput(event.target.value)}
-                      placeholder="Balanced detection and telemetry for production workloads."
+                      placeholder="Linux production endpoints."
                     />
                   </EuiFormRow>
 
-                  <EuiFormRow
-                    label={i18n.translate('xdrCoordinator.policyField.logLevel', {
-                      defaultMessage: 'Telemetry log level',
-                    })}
-                  >
-                    <EuiSelect
-                      value={policyLogLevel}
-                      onChange={(event) => setPolicyLogLevel(event.target.value as PolicyLogLevel)}
-                      options={[
-                        { value: 'minimal', text: 'Minimal' },
-                        { value: 'standard', text: 'Standard' },
-                        { value: 'verbose', text: 'Verbose' },
-                      ]}
-                    />
-                  </EuiFormRow>
-
-                  <EuiHorizontalRule margin="m" />
-
-                  <EuiSwitch
-                    label={i18n.translate('xdrCoordinator.policyField.malware', {
-                      defaultMessage: 'Malware prevention',
-                    })}
-                    checked={policyMalwareProtection}
-                    onChange={(event) => setPolicyMalwareProtection(event.target.checked)}
-                  />
-                  <EuiSpacer size="s" />
-                  <EuiSwitch
-                    label={i18n.translate('xdrCoordinator.policyField.fim', {
-                      defaultMessage: 'File integrity monitoring',
-                    })}
-                    checked={policyFileIntegrity}
-                    onChange={(event) => setPolicyFileIntegrity(event.target.checked)}
-                  />
-                  <EuiSpacer size="s" />
-                  <EuiSwitch
-                    label={i18n.translate('xdrCoordinator.policyField.osquery', {
-                      defaultMessage: 'Osquery module',
-                    })}
-                    checked={policyOsqueryEnabled}
-                    onChange={(event) => setPolicyOsqueryEnabled(event.target.checked)}
-                  />
-                  <EuiSpacer size="s" />
-                  <EuiSwitch
-                    label={i18n.translate('xdrCoordinator.policyField.autoUpgrade', {
-                      defaultMessage: 'Auto-upgrade agents',
-                    })}
-                    checked={policyAutoUpgrade}
-                    onChange={(event) => setPolicyAutoUpgrade(event.target.checked)}
-                  />
                 </EuiForm>
               </EuiFlyoutBody>
 

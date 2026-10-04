@@ -10,6 +10,7 @@
     "prebuild": "yarn version:sync",
     "build": "bash ./scripts/build_external.sh",
     "plugin-helpers": "node ../OpenSearch-Dashboards/scripts/plugin_helpers",
-    "osd": "node ../OpenSearch-Dashboards/scripts/osd"
+    "osd": "node ../OpenSearch-Dashboards/scripts/osd",
+    "test": "node --test scripts/test_api.cjs"
   }
 }

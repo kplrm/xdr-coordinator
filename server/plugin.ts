@@ -7,13 +7,12 @@ import {
   ISavedObjectsRepository,
 } from '../../OpenSearch-Dashboards/src/core/server';
 import { defineRoutes } from './routes';
-import { installTelemetryDashboard } from './telemetry_dashboard_installer';
 import { installTelemetryIsmPolicy } from './telemetry_ism_installer';
 import { installSecurityIsmPolicy } from './security_ism_installer';
 import { installAgentLogsIsmPolicy } from './logs_ism_installer';
 import { installManagementIndexPatterns } from './management_index_pattern_installer';
 import { XdrManagerPluginSetup, XdrManagerPluginStart } from './types';
-import { XDR_AGENT_SAVED_OBJECT_TYPE, XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE } from '../common';
+import { XDR_AGENT_SAVED_OBJECT_TYPE, XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE, XDR_POLICY_SAVED_OBJECT_TYPE } from '../common';
 
 export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManagerPluginStart> {
   private readonly logger: Logger;
@@ -44,6 +43,8 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
           tags: { type: 'keyword' },
           version: { type: 'keyword' },
           enrollmentToken: { type: 'keyword' },
+          pendingUpgradeVersion: { type: 'keyword' },
+          protection: { type: 'object', enabled: false },
         },
       },
     });
@@ -66,6 +67,11 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
       },
     });
 
+    core.savedObjects.registerType({
+      name: XDR_POLICY_SAVED_OBJECT_TYPE, hidden: true, namespaceType: 'agnostic',
+      mappings: { properties: { name: { type: 'keyword' }, description: { type: 'text' } } },
+    });
+
     const router = core.http.createRouter();
     defineRoutes(router, this.logger, this.agentRepoPromise);
 
@@ -79,15 +85,11 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
     const repo = core.savedObjects.createInternalRepository([
       XDR_AGENT_SAVED_OBJECT_TYPE,
       XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE,
+      XDR_POLICY_SAVED_OBJECT_TYPE,
     ]);
 
     // Resolve the promise so route handlers can use it
     this.agentRepoResolve(repo);
-
-    // Install the out-of-the-box telemetry dashboard (index-pattern + visualizations + dashboard)
-    installTelemetryDashboard(repo, this.logger).catch((err) =>
-      this.logger.error(`xdr_manager: telemetry dashboard install failed: ${err}`)
-    );
 
     // Install out-of-the-box hidden index patterns for logs and security views.
     installManagementIndexPatterns(repo, this.logger).catch((err) =>

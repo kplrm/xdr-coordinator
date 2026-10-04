@@ -17,7 +17,6 @@
     "outDir": "./target",
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "ignoreDeprecations": "6.0",
     "typeRoots": [
       "../OpenSearch-Dashboards/node_modules/@types",
       "node_modules/@types"

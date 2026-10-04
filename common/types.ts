@@ -1,16 +1,20 @@
 export type AgentStatus = 'healthy' | 'degraded' | 'offline' | 'unseen';
 export type XdrAction = 'upgrade';
-export type PolicyLogLevel = 'minimal' | 'standard' | 'verbose';
 
 export interface XdrPolicy {
   id: string;
   name: string;
   description: string;
-  malwareProtection: boolean;
-  fileIntegrityMonitoring: boolean;
-  autoUpgrade: boolean;
-  osqueryEnabled: boolean;
-  logLevel: PolicyLogLevel;
+}
+
+export interface ProtectionInventory {
+  rule_source: string;
+  rule_version: string;
+  rule_count: number;
+  mode: string;
+  platform: string;
+  rules_sha256: string;
+  health?: Record<string, string>;
 }
 
 export interface XdrAgent {
@@ -22,6 +26,8 @@ export interface XdrAgent {
   tags: string[];
   version: string;
   enrollmentToken?: string;
+  pendingUpgradeVersion?: string;
+  protection?: ProtectionInventory;
 }
 
 export interface ListAgentsResponse {
@@ -91,6 +97,7 @@ export interface ControlPlaneHeartbeatRequest {
   policy_id: string;
   tags: string[];
   agent_version: string;
+  protection?: ProtectionInventory;
 }
 
 export interface ControlPlaneHeartbeatResponse {
@@ -138,11 +145,6 @@ export interface ListPoliciesResponse {
 export interface UpsertPolicyRequest {
   name: string;
   description: string;
-  malwareProtection: boolean;
-  fileIntegrityMonitoring: boolean;
-  autoUpgrade: boolean;
-  osqueryEnabled: boolean;
-  logLevel: PolicyLogLevel;
 }
 
 export interface UpsertPolicyResponse {
@@ -178,112 +180,4 @@ export interface ControlPlaneTelemetryResponse {
   telemetry_indexed?: number;
   security_indexed?: number;
   message: string;
-}
-
-// ── Telemetry dashboard query responses ────────────────────────────────────
-
-export interface TelemetryHostMetrics {
-  cpu: {
-    cores: number;
-    total_pct: number;
-    user_pct: number;
-    system_pct: number;
-    idle_pct: number;
-    iowait_pct: number;
-    steal_pct: number;
-  };
-  memory: {
-    total: number;
-    used_bytes: number;
-    used_pct: number;
-    free: number;
-    actual_free: number;
-    cached: number;
-    buffer: number;
-    swap_total: number;
-    swap_free: number;
-    swap_used_bytes: number;
-  };
-  timestamp: string;
-}
-
-export interface TelemetryHostTimelinePoint {
-  timestamp: string;
-  cpu_total_pct: number;
-  cpu_user_pct: number;
-  cpu_system_pct: number;
-  cpu_iowait_pct: number;
-  memory_used_pct: number;
-}
-
-export interface TelemetryHostResponse {
-  latest: TelemetryHostMetrics | null;
-  timeline: TelemetryHostTimelinePoint[];
-}
-
-export interface TelemetryProcessEntry {
-  // Core identity
-  name: string;
-  pid: number;
-  ppid: number;
-  executable: string;
-  command_line: string;
-  args: string[];
-  working_directory: string;
-  state: string;
-  entity_id: string;
-  // CPU (from process.cpu metric events)
-  cpu_pct: number;
-  // User / group context
-  user_id: number;
-  user_name: string;
-  group_id: number;
-  group_name: string;
-  // Security
-  cap_eff: string;
-  exe_sha256: string;
-  // Resource metrics
-  threads_count: number;
-  fd_count: number;
-  mem_rss_bytes: number;
-  mem_vms_bytes: number;
-  io_read_bytes: number;
-  io_write_bytes: number;
-  // Lineage
-  parent_pid: number;
-  parent_name: string;
-  // Event metadata
-  event_type: string;
-  timestamp: string;
-}
-
-export interface TelemetryProcessResponse {
-  processes: TelemetryProcessEntry[];
-  total_events: number;
-  process_starts: number;
-  process_ends: number;
-}
-
-export interface TelemetryNetworkConnection {
-  direction: string;
-  local_addr: string;
-  local_port: number;
-  remote_addr: string;
-  remote_port: number;
-  protocol: string;
-  state: string;
-  transport: string;
-  timestamp: string;
-  event_type: string;
-}
-
-export interface TelemetryNetworkResponse {
-  connections: TelemetryNetworkConnection[];
-  summary: {
-    total: number;
-    inbound: number;
-    outbound: number;
-  };
-  protocols: Record<string, number>;
-  states: Record<string, number>;
 }

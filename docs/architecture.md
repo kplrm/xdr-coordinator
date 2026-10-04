@@ -1,86 +1,11 @@
-# xdr-coordinator Architecture
+# Coordinator architecture
 
-`xdr-coordinator` is the fleet and telemetry operations plugin for the XDR stack.
+Coordinator owns fleet lifecycle and event intake for XDR Security. Agent detection/prevention stays local. Visualizer owns alert inspection and investigations.
 
-It sits between `xdr-agent`, OpenSearch, and the operator UI. Its job is to keep endpoint lifecycle and telemetry operations coherent without taking over rule management or endpoint enforcement.
+Hidden saved objects store agents (`xdr-agent`), enrollment tokens (`xdr-enrollment-token`), and persistent grouping policies (`xdr-agent-policy`). Tokens bind to an enrolled agent. Agent removal revokes its consumed token; token revocation stops authenticated agent traffic. Deleting a fleet record does not uninstall endpoint software.
 
-## What It Owns
+Agents enroll, heartbeat, poll upgrade commands, and send gzip JSON batches to `/api/v1/agents/*`. Heartbeats record installed-rule digest/version/count, mode, and actual component health. Stale agents become offline after five minutes. Upgrade commands remain pending until the reported version matches the target. Grouping is independent of protection content.
 
-### Agent-facing control-plane routes
-- Enrollment
-- Heartbeat
-- Fast command polling
-- Telemetry and security intake routes consumed by the agent runtime
+Events are indexed into daily `.xdr-agent-telemetry-*`, `.xdr-agent-security-*`, and `.xdr-agent-logs-*` indices with retention templates. Intake authenticates agent identity, checks topic, normalizes the indexed owner, preserves event identity on retry, and returns errors for bulk failures. Large-volume events are not stored in saved objects.
 
-### Operator-facing fleet routes
-- Agent listing and lifecycle actions
-- Enrollment token creation, listing, status, and revocation
-- Policy CRUD for coordinator-managed fleet policy objects
-- Telemetry views used by the UI
-
-### OpenSearch bootstrap work
-- Hidden saved object types for agent and enrollment-token records
-- Hidden index patterns for telemetry, security, and logs
-- Telemetry dashboards and visualizations
-- ISM policies and index templates for the agent-facing index families
-
-## What It Does Not Own
-
-- Detection and prevention content authoring
-- Bundle signing and artifact curation
-- Endpoint-side detection logic
-- Wrapper navigation concerns
-
-Those responsibilities belong to `xdr-defense`, `xdr-agent`, and `xdr-security` respectively.
-
-## Runtime Structure
-
-### Setup phase
-- Registers hidden saved object types for agents and enrollment tokens.
-- Creates the HTTP router and registers route families.
-
-### Start phase
-- Creates the internal saved object repository used by route handlers.
-- Installs telemetry dashboards and hidden index patterns.
-- Installs ISM policies and index templates for telemetry, security, and agent logs.
-
-## Persistence Model
-
-### Saved objects
-Coordinator uses hidden saved objects for low-volume control metadata:
-
-- `xdr-agent`
-- `xdr-enrollment-token`
-
-This is where fleet records and enrollment token lifecycle live.
-
-### OpenSearch indices
-Coordinator also assumes ownership of operational index lifecycle for:
-
-- `.xdr-agent-telemetry-*`
-- `.xdr-agent-security-*`
-- `.xdr-agent-logs-*`
-
-These indices are hidden and receive templates plus 90-day ISM retention policies.
-
-## Cross-Repo Interaction
-
-### With `xdr-agent`
-- Agents enroll and heartbeat through coordinator routes.
-- Agents poll for pending commands.
-- Agents ship telemetry, security events, and logs into the index families coordinator prepares.
-
-### With `xdr-defense`
-- Coordinator does not author content.
-- Coordinator can surface pending rollout commands to agents based on rollout state stored by `xdr-defense`.
-
-### With `xdr-security`
-- Coordinator remains the owner of fleet logic.
-- The wrapper plugin should only provide navigation grouping.
-
-## Design Rules
-
-- Keep fleet metadata small and explicit.
-- Keep large-volume event data in OpenSearch indices, not saved objects.
-- Keep compatibility logic near the route layer when bridging rollout behavior from `xdr-defense` to agents.
-- Do not duplicate defense bundle logic here.
+The UI manages agents, policy groups, and enrollment tokens. There are no Defense rollout commands, remote rule editing, or obsolete host-resource dashboards. Agent runtime defaults send health every 30 seconds and batches every 30 seconds. The complete agent endpoint list and regression rules are authoritative in `xdr-agent/docs/api-endpoints.md`.
