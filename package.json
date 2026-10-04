@@ -11,6 +11,7 @@
     "build": "bash ./scripts/build_external.sh",
     "plugin-helpers": "node ../OpenSearch-Dashboards/scripts/plugin_helpers",
     "osd": "node ../OpenSearch-Dashboards/scripts/osd",
-    "test": "node --test scripts/test_api.cjs"
+    "test": "node --test scripts/test_api.cjs",
+    "test:ingest:integration": "node --test scripts/test_telemetry_integration.cjs"
   }
 }

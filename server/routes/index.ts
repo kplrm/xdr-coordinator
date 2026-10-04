@@ -1,6 +1,7 @@
 import { schema } from '@osd/config-schema';
 import { randomBytes } from 'crypto';
 import * as https from 'https';
+import { summarizeBulkFailures } from '../bulk_index_error';
 import { IRouter, ISavedObjectsRepository, Logger } from '../../../OpenSearch-Dashboards/src/core/server';
 import {
   AgentStatus,
@@ -930,7 +931,7 @@ export function defineRoutes(
           const action = item.index || item.create || item.update || item.delete;
           return action?.error;
         });
-        throw new Error(`Bulk index to [${indexName}]: ${failedItems.length}/${end - start} ${kind} events failed`);
+        throw new Error(`Bulk index to [${indexName}]: ${failedItems.length}/${end - start} ${kind} events failed; samples=${summarizeBulkFailures(failedItems)}`);
       }
     }
   };

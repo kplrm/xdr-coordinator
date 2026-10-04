@@ -5,8 +5,8 @@
  *
  * The ISM policy retains data for 90 days, then deletes the index.
  *
- * Called once from plugin.start(). Idempotent — skips creation if the
- * policy / template already exist.
+ * Called once from plugin.start(). Updates the template and supported mapping
+ * parameters on existing indices; an existing retention policy is preserved.
  */
 
 import { Logger } from '../../OpenSearch-Dashboards/src/core/server';
@@ -14,6 +14,28 @@ import { Logger } from '../../OpenSearch-Dashboards/src/core/server';
 const ISM_POLICY_ID = 'xdr-telemetry-retention';
 const INDEX_TEMPLATE_NAME = 'xdr-telemetry-template';
 const INDEX_PATTERN = '.xdr-agent-telemetry-*';
+
+// Lucene terms are limited to 32,766 UTF-8 bytes. This character limit remains
+// safe even for four-byte Unicode characters. Full values remain in _source.
+const PROCESS_TEXT_FIELDS = {
+  command_line: { type: 'keyword', ignore_above: 8191 },
+  args: { type: 'keyword', ignore_above: 8191 },
+};
+
+const PROCESS_TEXT_MAPPING_UPDATE = {
+  properties: {
+    payload: {
+      properties: {
+        process: {
+          properties: {
+            ...PROCESS_TEXT_FIELDS,
+            parent: { properties: PROCESS_TEXT_FIELDS },
+          },
+        },
+      },
+    },
+  },
+};
 
 /**
  * The ISM policy definition:
@@ -232,8 +254,7 @@ function buildIndexTemplate() {
                   ppid:              { type: 'integer' },
                   name:              { type: 'keyword' },
                   executable:        { type: 'keyword' },
-                  command_line:      { type: 'keyword' },
-                  args:              { type: 'keyword' },
+                  ...PROCESS_TEXT_FIELDS,
                   working_directory: { type: 'keyword' },
                   entity_id:         { type: 'keyword' },
                   state:             { type: 'keyword' },
@@ -302,8 +323,7 @@ function buildIndexTemplate() {
                       ppid:         { type: 'integer' },
                       name:         { type: 'keyword' },
                       executable:   { type: 'keyword' },
-                      command_line: { type: 'keyword' },
-                      args:         { type: 'keyword' },
+                      ...PROCESS_TEXT_FIELDS,
                       entity_id:    { type: 'keyword' },
                     },
                   },
@@ -605,5 +625,20 @@ export async function installTelemetryIsmPolicy(
     logger.info(`xdr_manager: installed index template [${INDEX_TEMPLATE_NAME}]`);
   } catch (err) {
     logger.warn(`xdr_manager: failed to install index template: ${err}`);
+  }
+
+  // Template updates only apply to new indices. Repair existing hidden indices
+  // as well, so an already queued batch can succeed without waiting for rollover.
+  try {
+    await opensearchClient.indices.putMapping({
+      index: INDEX_PATTERN,
+      expand_wildcards: 'open,hidden',
+      allow_no_indices: true,
+      ignore_unavailable: true,
+      body: PROCESS_TEXT_MAPPING_UPDATE,
+    });
+    logger.info('xdr_manager: applied safe process keyword limits to existing telemetry indices');
+  } catch (err) {
+    logger.warn(`xdr_manager: failed to update telemetry process keyword limits: ${err}`);
   }
 }

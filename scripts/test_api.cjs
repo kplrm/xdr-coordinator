@@ -18,6 +18,8 @@ require.extensions['.ts'] = (module, filename) => module._compile(
 );
 
 const { defineRoutes } = require('../server/routes/index.ts');
+const { summarizeBulkFailures } = require('../server/bulk_index_error.ts');
+const { installTelemetryIsmPolicy } = require('../server/telemetry_ism_installer.ts');
 const {
   XDR_AGENT_SAVED_OBJECT_TYPE: AGENT,
   XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE: TOKEN,
@@ -45,6 +47,7 @@ response.customError = ({ statusCode, body }) => ({ status: statusCode, body });
 function fixture() {
   const objects = new Map();
   const batches = [];
+  const errors = [];
   let next = 0;
   const repo = {
     async get(type, id) {
@@ -83,7 +86,7 @@ function fixture() {
     router[method] = (config, handler) =>
       routes.set(`${method.toUpperCase()} ${config.path}`, { config, handler });
   }
-  defineRoutes(router, { warn() {}, error() {}, info() {} }, Promise.resolve(repo));
+  defineRoutes(router, { warn() {}, error: (message) => errors.push(message), info() {} }, Promise.resolve(repo));
 
   const context = {
     core: {
@@ -125,7 +128,7 @@ function fixture() {
       version: '1.0.0', pendingUpgradeVersion: '2.0.0',
     }, { id: 'agent-1' });
   };
-  return { repo, routes, call, context, batches, seed };
+  return { repo, routes, call, context, batches, errors, seed };
 }
 
 const identity = {
@@ -144,6 +147,53 @@ const event = (module, kind = 'event') => ({
   'agent.id': 'spoofed',
   'host.hostname': 'host',
   payload: {},
+});
+
+test('bulk diagnostics identify status, field and causes without logging event values', () => {
+  const error = { index: { status: 400, error: {
+    type: 'mapper_parsing_exception',
+    reason: "failed to parse field [payload.process.command_line] of type [keyword]. Preview of field's value: 'secret-input'",
+    caused_by: { type: 'illegal_argument_exception', reason: 'sensitive payload' },
+  } } };
+  const summary = summarizeBulkFailures([error, error, error, error]);
+  assert.equal(JSON.parse(summary).length, 3);
+  assert.deepEqual(JSON.parse(summary)[0], {
+    status: 400, field: 'payload.process.command_line',
+    causes: ['mapper_parsing_exception', 'illegal_argument_exception'],
+  });
+  assert.doesNotMatch(summary, /secret-input|sensitive payload/);
+  assert.equal(JSON.parse(summarizeBulkFailures([{ index: { status: 403, error: {
+    type: 'security_exception', reason: 'no permissions for [indices:data/write/index]',
+  } } }]))[0].causes[0], 'security_exception');
+});
+
+test('startup bounds process keywords in new and existing hidden telemetry indices', async () => {
+  let template;
+  let update;
+  const warnings = [];
+  await installTelemetryIsmPolicy({
+    transport: { request: async () => { throw { statusCode: 409 }; } },
+    indices: {
+      putIndexTemplate: async (request) => { template = request; },
+      putMapping: async (request) => { update = request; },
+    },
+  }, { info() {}, debug() {}, warn: (message) => warnings.push(message) });
+  assert.deepEqual(warnings, []);
+  assert.equal(update.index, '.xdr-agent-telemetry-*');
+  assert.equal(update.expand_wildcards, 'open,hidden');
+  assert.equal(update.allow_no_indices, true);
+  assert.equal(update.ignore_unavailable, true);
+  const newProcess = template.body.template.mappings.properties.payload.properties.process.properties;
+  const existingProcess = update.body.properties.payload.properties.process.properties;
+  for (const process of [newProcess, existingProcess]) {
+    for (const fields of [process, process.parent.properties]) {
+      for (const name of ['command_line', 'args']) {
+        assert.equal(fields[name].type, 'keyword');
+        assert.equal(fields[name].ignore_above, 8191);
+      }
+    }
+  }
+  assert.deepEqual(Object.keys(existingProcess).sort(), ['args', 'command_line', 'parent']);
 });
 
 test('registered agent routes exactly match the maintained contract', () => {
@@ -216,9 +266,14 @@ for (const [topic, module, kind] of [
     );
     assert.equal((await f.call(route, { body: { ...body, events: [wrong] } })).status, 400);
     f.context.core.opensearch.client.asInternalUser.bulk = async () => ({
-      body: { errors: true, items: [{ index: { error: { reason: 'fixture' } } }] },
+      body: { errors: true, items: [{ index: { status: 400, error: {
+        type: 'mapper_parsing_exception',
+        reason: "failed to parse field [payload.process.args] of type [keyword]. Preview of field's value: 'secret-input'",
+      } } }] },
     });
     assert.equal((await f.call(route, { body })).status, 502);
+    assert.match(f.errors[0], /400.*payload.process.args.*mapper_parsing_exception/);
+    assert.doesNotMatch(f.errors[0], /secret-input/);
     await f.repo.delete(TOKEN, 'token-1');
     assert.equal((await f.call(route, { body })).status, 401);
   });
