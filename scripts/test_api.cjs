@@ -20,6 +20,8 @@ require.extensions['.ts'] = (module, filename) => module._compile(
 const { defineRoutes } = require('../server/routes/index.ts');
 const { summarizeBulkFailures } = require('../server/bulk_index_error.ts');
 const { installTelemetryIsmPolicy } = require('../server/telemetry_ism_installer.ts');
+const { installSecurityIsmPolicy } = require('../server/security_ism_installer.ts');
+const { installAgentLogsIsmPolicy } = require('../server/logs_ism_installer.ts');
 const {
   XDR_AGENT_SAVED_OBJECT_TYPE: AGENT,
   XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE: TOKEN,
@@ -44,7 +46,7 @@ const response = Object.fromEntries(
 response.customError = ({ statusCode, body }) => ({ status: statusCode, body });
 
 // Replace saved objects and OpenSearch with in-memory fakes, but invoke real route handlers.
-function fixture() {
+function fixture(ingestionReady) {
   const objects = new Map();
   const batches = [];
   const errors = [];
@@ -86,7 +88,7 @@ function fixture() {
     router[method] = (config, handler) =>
       routes.set(`${method.toUpperCase()} ${config.path}`, { config, handler });
   }
-  defineRoutes(router, { warn() {}, error: (message) => errors.push(message), info() {} }, Promise.resolve(repo));
+  defineRoutes(router, { warn() {}, error: (message) => errors.push(message), info() {} }, Promise.resolve(repo), ingestionReady);
 
   const context = {
     core: {
@@ -172,14 +174,17 @@ test('startup bounds process keywords in new and existing hidden telemetry indic
   let update;
   const warnings = [];
   await installTelemetryIsmPolicy({
-    transport: { request: async () => { throw { statusCode: 409 }; } },
+    transport: { request: async ({ method }) => {
+      if (method === 'GET') throw { statusCode: 404 };
+      return {};
+    } },
     indices: {
       putIndexTemplate: async (request) => { template = request; },
       putMapping: async (request) => { update = request; },
     },
   }, { info() {}, debug() {}, warn: (message) => warnings.push(message) });
   assert.deepEqual(warnings, []);
-  assert.equal(update.index, '.xdr-agent-telemetry-*');
+  assert.equal(update.index, 'xdr-agent-telemetry,.xdr-agent-telemetry-*');
   assert.equal(update.expand_wildcards, 'open,hidden');
   assert.equal(update.allow_no_indices, true);
   assert.equal(update.ignore_unavailable, true);
@@ -259,7 +264,9 @@ for (const [topic, module, kind] of [
     assert.equal((await f.call(route, { body, headers: {} })).status, 401);
     assert.equal((await f.call(route, { body })).body.indexed, 1);
     assert.equal(f.batches[0][1]['agent.id'], 'agent-1');
-    assert.equal(f.batches[0][0].index._id, 'agent-1:event-1');
+    assert.deepEqual(f.batches[0][0].create, {
+      _id: 'agent-1:event-1', _index: `xdr-agent-${topic}`,
+    });
     const wrong = event(
       topic === 'security' ? 'telemetry.process' : 'detection.malware',
       topic === 'security' ? 'event' : 'alert'
@@ -278,6 +285,60 @@ for (const [topic, module, kind] of [
     assert.equal((await f.call(route, { body })).status, 401);
   });
 }
+
+test('create conflicts are acknowledged as retries; other 409s are rejected', async () => {
+  const f = fixture(); await f.seed();
+  const body = { agent_id: 'agent-1', events: [event('telemetry.process')] };
+  let type = 'version_conflict_engine_exception';
+  f.context.core.opensearch.client.asInternalUser.bulk = async () => ({ body: {
+    errors: true, items: [{ create: { status: 409, error: { type } } }],
+  } });
+  assert.equal((await f.call(expected[3], { body })).status, 200);
+  type = 'security_exception';
+  assert.equal((await f.call(expected[3], { body })).status, 502);
+});
+
+test('ingestion cannot create ordinary indices before stream provisioning completes', async () => {
+  let fail;
+  const ready = new Promise((_resolve, reject) => { fail = reject; });
+  const f = fixture(ready); await f.seed();
+  const result = f.call(expected[3], { body: { agent_id: 'agent-1', events: [event('telemetry.process')] } });
+  fail(new Error('data stream template permission denied'));
+  assert.equal((await result).status, 502);
+  assert.equal(f.batches.length, 0);
+});
+
+test('stream provisioning migrates XDR policies while preserving existing hot retention', async () => {
+  const legacy = {
+    description: 'Operator changed retention to 45 days', default_state: 'hot',
+    states: [
+      { name: 'hot', actions: [], transitions: [{ state_name: 'delete', conditions: { min_index_age: '45d' } }] },
+      { name: 'delete', actions: [{ delete: {} }], transitions: [] },
+    ],
+    ism_template: [],
+  };
+  for (const [topic, install] of [['telemetry', installTelemetryIsmPolicy], ['security', installSecurityIsmPolicy], ['logs', installAgentLogsIsmPolicy]]) {
+    const calls = []; let template;
+    const original = { ...legacy, ism_template: [{ index_patterns: [`.xdr-agent-${topic}-*`], priority: 100 }] };
+    await install({
+      transport: { request: async (request) => {
+        calls.push(request);
+        if (request.method === 'GET') return { body: { policy: original, _seq_no: 7, _primary_term: 2 } };
+        return {};
+      } },
+      indices: { putIndexTemplate: async (request) => { template = request.body; }, putMapping: async () => {} },
+    }, { info() {}, debug() {}, warn: (message) => assert.fail(message) });
+    const policy = calls.find((request) => request.body?.policy).body.policy;
+    assert.equal(policy.default_state, 'rollover');
+    assert.deepEqual(policy.ism_template[0].index_patterns, [`xdr-agent-${topic}`, `.ds-xdr-agent-${topic}-*`]);
+    assert.deepEqual(policy.states.find((state) => state.name === 'hot'), legacy.states[0]);
+    assert.deepEqual(template.data_stream, {});
+    assert.deepEqual(template.index_patterns, [`xdr-agent-${topic}`]);
+    assert.ok(calls.some((request) => request.path === `/_data_stream/xdr-agent-${topic}`));
+    assert.ok(calls.every((request) => !request.path.includes('homelab')));
+    assert.ok(calls.find((request) => request.body?.policy).path.includes('if_seq_no=7&if_primary_term=2'));
+  }
+});
 
 test('token status, tagging, revocation, and grouping CRUD remain functional', async () => {
   const f = fixture();

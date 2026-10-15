@@ -2,6 +2,7 @@ import { schema } from '@osd/config-schema';
 import { randomBytes } from 'crypto';
 import * as https from 'https';
 import { summarizeBulkFailures } from '../bulk_index_error';
+import { EVENT_STREAMS } from '../event_data_stream';
 import { IRouter, ISavedObjectsRepository, Logger } from '../../../OpenSearch-Dashboards/src/core/server';
 import {
   AgentStatus,
@@ -226,7 +227,8 @@ const policyRequestSchema = schema.object({
 export function defineRoutes(
   router: IRouter,
   logger: Logger,
-  agentRepoPromise: Promise<ISavedObjectsRepository>
+  agentRepoPromise: Promise<ISavedObjectsRepository>,
+  ingestionReady: Promise<void> = Promise.resolve()
 ) {
   const collectPendingCommands = async (agentId: string, agentVersion: string): Promise<string[]> => {
     const repo = await agentRepoPromise;
@@ -866,20 +868,12 @@ export function defineRoutes(
   // ── Topic ingestion (telemetry, security, logs) ──────────────────────────
   // Agent-facing endpoints. Each topic uses its own HTTP path and index.
 
-  const XDR_TELEMETRY_INDEX_PREFIX = '.xdr-agent-telemetry';
-  const XDR_SECURITY_INDEX_PREFIX = '.xdr-agent-security';
-  const XDR_LOGS_INDEX_PREFIX = '.xdr-agent-logs';
   const MAX_EVENTS_PER_INGEST_REQUEST = 1000;
   const BULK_INDEX_CHUNK_SIZE = 250;
   const isSecurityEvent = (event: ControlPlaneTelemetryRequest['events'][number]) =>
     event['event.kind'] === 'alert' || /^(detection|prevention|response)\./.test(event['event.module']);
   const isAgentLogEvent = (event: ControlPlaneTelemetryRequest['events'][number]) =>
     event['event.type'] === 'agent.log' || event['event.module'] === 'agent.logger';
-
-  const buildDailyIndexName = (prefix: string): string => {
-    const today = new Date().toISOString().slice(0, 10);
-    return `${prefix}-${today}`;
-  };
 
   const telemetryEventSchema = schema.object({
     id: schema.string({ minLength: 1 }),
@@ -917,7 +911,7 @@ export function defineRoutes(
 
       for (let i = start; i < end; i++) {
         const evt = events[i];
-        bulkBody.push({ index: { _index: indexName, _id: `${payload.agent_id}:${evt.id}` } });
+        bulkBody.push({ create: { _index: indexName, _id: `${payload.agent_id}:${evt.id}` } });
         bulkBody.push({
           ...evt,
           'agent.id': payload.agent_id,
@@ -929,18 +923,19 @@ export function defineRoutes(
       if (bulkResponse.body.errors) {
         const failedItems = bulkResponse.body.items.filter((item: any) => {
           const action = item.index || item.create || item.update || item.delete;
-          return action?.error;
+          return action?.error && !(item.create?.status === 409 &&
+            item.create.error.type === 'version_conflict_engine_exception');
         });
-        throw new Error(`Bulk index to [${indexName}]: ${failedItems.length}/${end - start} ${kind} events failed; samples=${summarizeBulkFailures(failedItems)}`);
+        if (failedItems.length) throw new Error(`Bulk index to [${indexName}]: ${failedItems.length}/${end - start} ${kind} events failed; samples=${summarizeBulkFailures(failedItems)}`);
       }
     }
   };
 
   const topics = [
-    { path: '/api/v1/agents/telemetry', kind: 'telemetry' as const, prefix: XDR_TELEMETRY_INDEX_PREFIX,
+    { path: '/api/v1/agents/telemetry', kind: 'telemetry' as const, stream: EVENT_STREAMS.telemetry,
       accepts: (event: ControlPlaneTelemetryRequest['events'][number]) => !isSecurityEvent(event) && !isAgentLogEvent(event) },
-    { path: '/api/v1/agents/security', kind: 'security' as const, prefix: XDR_SECURITY_INDEX_PREFIX, accepts: isSecurityEvent },
-    { path: '/api/v1/agents/logs', kind: 'logs' as const, prefix: XDR_LOGS_INDEX_PREFIX, accepts: isAgentLogEvent },
+    { path: '/api/v1/agents/security', kind: 'security' as const, stream: EVENT_STREAMS.security, accepts: isSecurityEvent },
+    { path: '/api/v1/agents/logs', kind: 'logs' as const, stream: EVENT_STREAMS.logs, accepts: isAgentLogEvent },
   ];
   for (const topic of topics) {
     router.post({
@@ -963,7 +958,8 @@ export function defineRoutes(
         return response.badRequest({ body: { message: `Events do not belong to ${topic.kind} endpoint` } });
       }
       try {
-        const indexName = buildDailyIndexName(topic.prefix);
+        await ingestionReady;
+        const indexName = topic.stream;
         await indexBatch(context, payload, payload.events, indexName, topic.kind);
         const body: ControlPlaneTelemetryResponse = {
           indexed: payload.events.length,
@@ -972,7 +968,7 @@ export function defineRoutes(
         return response.ok({ body });
       } catch (err) {
         logger.error(`Failed to index ${topic.kind} events: ${err}`);
-        // Stable event IDs make retrying a partially accepted batch safe.
+        // Stable IDs deduplicate partial retries within the current backing index.
         return response.customError({ statusCode: 502, body: { message: `Failed to index ${topic.kind} events` } });
       }
     });
@@ -1024,7 +1020,7 @@ export function defineRoutes(
 
       const body: RemoveAgentResponse = {
         removedAgentId: agentId,
-        message: `Agent [${agentId}] removed. Further communications will be rejected.`,
+        message: `Agent [${agentId}] removed. Coordinator requests will be rejected; revoke direct OpenSearch credentials separately.`,
       };
 
       return response.ok({ body });

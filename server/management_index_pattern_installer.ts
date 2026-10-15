@@ -17,7 +17,7 @@ function buildIndexPatterns(): IndexPatternObject[] {
       type: 'index-pattern',
       id: 'xdr-agent-logs-hidden',
       attributes: {
-        title: '.xdr-agent-logs-*',
+        title: 'xdr-agent-logs,.xdr-agent-logs-*',
         timeFieldName: '@timestamp',
         fields: '[]',
       },
@@ -27,7 +27,7 @@ function buildIndexPatterns(): IndexPatternObject[] {
       type: 'index-pattern',
       id: 'xdr-agent-security-hidden',
       attributes: {
-        title: '.xdr-agent-security-*',
+        title: 'xdr-agent-security,.xdr-agent-security-*',
         timeFieldName: '@timestamp',
         fields: '[]',
       },
@@ -41,6 +41,17 @@ export async function installManagementIndexPatterns(
   logger: Logger
 ): Promise<void> {
   try {
+    for (const pattern of buildIndexPatterns()) {
+      try {
+        const existing = await repo.get<{ title: string }>(pattern.type, pattern.id);
+        const legacy = pattern.attributes.title.split(',')[1];
+        if (existing.attributes.title === legacy) {
+          await repo.update(pattern.type, pattern.id, { title: pattern.attributes.title });
+        }
+      } catch (error: any) {
+        if (error?.output?.statusCode !== 404) throw error;
+      }
+    }
     const result = await repo.bulkCreate(buildIndexPatterns() as any[], { overwrite: false });
     const errors = result.saved_objects.filter(
       (obj: any) => obj.error && obj.error.statusCode !== 409

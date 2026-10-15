@@ -1,19 +1,9 @@
-/**
- * Sets up an OpenSearch Index State Management (ISM) policy for XDR telemetry
- * indices and an index template that auto-attaches the policy to new daily
- * indices matching `.xdr-agent-telemetry-*`.
- *
- * The ISM policy retains data for 90 days, then deletes the index.
- *
- * Called once from plugin.start(). Updates the template and supported mapping
- * parameters on existing indices; an existing retention policy is preserved.
- */
+/** Mappings, data stream and retention for XDR telemetry. */
 
-import { Logger } from '../../OpenSearch-Dashboards/src/core/server';
+import type { Logger } from '../../OpenSearch-Dashboards/src/core/server';
+import { installEventDataStream } from './event_data_stream';
 
-const ISM_POLICY_ID = 'xdr-telemetry-retention';
-const INDEX_TEMPLATE_NAME = 'xdr-telemetry-template';
-const INDEX_PATTERN = '.xdr-agent-telemetry-*';
+const INDEX_PATTERN = 'xdr-agent-telemetry,.xdr-agent-telemetry-*';
 
 // Lucene terms are limited to 32,766 UTF-8 bytes. This character limit remains
 // safe even for four-byte Unicode characters. Full values remain in _source.
@@ -37,65 +27,15 @@ const PROCESS_TEXT_MAPPING_UPDATE = {
   },
 };
 
-/**
- * The ISM policy definition:
- *   hot (current) → 90 days → delete
- */
-function buildIsmPolicy() {
-  return {
-    policy: {
-      description: 'Retain XDR telemetry indices for 90 days, then delete.',
-      default_state: 'hot',
-      states: [
-        {
-          name: 'hot',
-          actions: [],
-          transitions: [
-            {
-              state_name: 'delete',
-              conditions: {
-                min_index_age: '90d',
-              },
-            },
-          ],
-        },
-        {
-          name: 'delete',
-          actions: [
-            {
-              delete: {},
-            },
-          ],
-          transitions: [],
-        },
-      ],
-      ism_template: [
-        {
-          index_patterns: [INDEX_PATTERN],
-          priority: 100,
-        },
-      ],
-    },
-  };
-}
-
-/**
- * The index template ensures every new `.xdr-agent-telemetry-*` index gets:
- *   - number_of_shards: 1, number_of_replicas: 0
- *   - hidden: true
- *   - The correct field mappings
- *   - The ISM policy auto-attached via opendistro.index_state_management.policy_id
- */
 function buildIndexTemplate() {
   return {
-    index_patterns: [INDEX_PATTERN],
+    index_patterns: ['xdr-agent-telemetry'],
     priority: 100,
     template: {
       settings: {
         number_of_shards: 1,
         number_of_replicas: 0,
         'index.hidden': true,
-        'opendistro.index_state_management.policy_id': ISM_POLICY_ID,
       },
       mappings: {
         dynamic: true,
@@ -122,6 +62,7 @@ function buildIndexTemplate() {
           },
         ],
         properties: {
+          id: { type: 'keyword' },
           '@timestamp': { type: 'date' },
           'event.type': { type: 'keyword' },
           'event.category': { type: 'keyword' },
@@ -594,38 +535,7 @@ export async function installTelemetryIsmPolicy(
   opensearchClient: any,
   logger: Logger
 ): Promise<void> {
-  const isPolicyAlreadyExistsError = (err: any): boolean => {
-    const statusCode = err?.statusCode ?? err?.meta?.statusCode;
-    const message = String(err?.message ?? err?.meta?.body?.error?.reason ?? '').toLowerCase();
-    return statusCode === 409 || message.includes('version conflict') || message.includes('already exists');
-  };
-
-  // ── 1. Create or update ISM policy ────────────────────────────────────
-  try {
-    await opensearchClient.transport.request({
-      method: 'PUT',
-      path: `/_plugins/_ism/policies/${ISM_POLICY_ID}`,
-      body: buildIsmPolicy(),
-    });
-    logger.info(`xdr_manager: upserted ISM policy [${ISM_POLICY_ID}] (90-day retention)`);
-  } catch (err: any) {
-    if (isPolicyAlreadyExistsError(err)) {
-      logger.debug(`xdr_manager: ISM policy [${ISM_POLICY_ID}] already exists/conflicted during startup`);
-    } else {
-      logger.warn(`xdr_manager: failed to upsert ISM policy: ${err}`);
-    }
-  }
-
-  // ── 2. Create or update composable index template ─────────────────────
-  try {
-    await opensearchClient.indices.putIndexTemplate({
-      name: INDEX_TEMPLATE_NAME,
-      body: buildIndexTemplate(),
-    });
-    logger.info(`xdr_manager: installed index template [${INDEX_TEMPLATE_NAME}]`);
-  } catch (err) {
-    logger.warn(`xdr_manager: failed to install index template: ${err}`);
-  }
+  await installEventDataStream(opensearchClient, logger, 'telemetry', buildIndexTemplate());
 
   // Template updates only apply to new indices. Repair existing hidden indices
   // as well, so an already queued batch can succeed without waiting for rollover.

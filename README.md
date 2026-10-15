@@ -1,6 +1,6 @@
 # XDR Coordinator
 
-Coordinator manages Linux XDR Agent enrollment tokens, registration/removal, upgrades, and persistent policy groups. It receives periodic health and compressed telemetry, alert, and runtime-log batches. Policies are grouping labels; protection content ships with agent releases.
+Coordinator manages Linux XDR Agent enrollment, health, upgrades and grouping policies. It provisions event data streams and accepts event batches when direct OpenSearch ingestion is disabled. Policies are grouping labels; protection content ships with agent releases.
 
 - [Architecture](docs/architecture.md)
 - [API and data model](docs/api-data-model.md)
@@ -8,7 +8,7 @@ Coordinator manages Linux XDR Agent enrollment tokens, registration/removal, upg
 
 ```bash
 npm test
-npm run build -- --opensearch-dashboards-version 3.5.0
+npm run build -- --opensearch-dashboards-version 3.9.0
 ```
 
 Builds use a disposable Dashboards copy and leave the upstream checkout untouched. Set `OSD_ROOT` to select another build checkout.

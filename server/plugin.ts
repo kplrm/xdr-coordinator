@@ -18,12 +18,21 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
   private readonly logger: Logger;
   private agentRepoResolve!: (repo: ISavedObjectsRepository) => void;
   private readonly agentRepoPromise: Promise<ISavedObjectsRepository>;
+  private readonly ingestionReady: Promise<void>;
+  private ingestionResolve!: () => void;
+  private ingestionReject!: (error: unknown) => void;
 
   constructor(initializerContext: PluginInitializerContext) {
     this.logger = initializerContext.logger.get();
     this.agentRepoPromise = new Promise<ISavedObjectsRepository>((resolve) => {
       this.agentRepoResolve = resolve;
     });
+    this.ingestionReady = new Promise<void>((resolve, reject) => {
+      this.ingestionResolve = resolve;
+      this.ingestionReject = reject;
+    });
+    // Startup reports the error; ingestion requests receive 502 until repaired.
+    void this.ingestionReady.catch(() => {});
   }
 
   public setup(core: CoreSetup): XdrManagerPluginSetup {
@@ -73,7 +82,7 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
     });
 
     const router = core.http.createRouter();
-    defineRoutes(router, this.logger, this.agentRepoPromise);
+    defineRoutes(router, this.logger, this.agentRepoPromise, this.ingestionReady);
 
     return {};
   }
@@ -96,27 +105,18 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
       this.logger.error(`xdr_manager: management index-pattern install failed: ${err}`)
     );
 
-    // Install ISM policy (90-day retention) and index template for telemetry indices
-    const opensearchClient = core.opensearch.client.asInternalUser;
-    (async () => {
-      try {
-        await installTelemetryIsmPolicy(opensearchClient, this.logger);
-      } catch (err) {
-        this.logger.error(`xdr_manager: ISM policy install failed: ${err}`);
-      }
-
-      try {
-        await installSecurityIsmPolicy(opensearchClient, this.logger);
-      } catch (err) {
-        this.logger.error(`xdr_manager: security ISM policy install failed: ${err}`);
-      }
-
-      try {
-        await installAgentLogsIsmPolicy(opensearchClient, this.logger);
-      } catch (err) {
-        this.logger.error(`xdr_manager: logs ISM policy install failed: ${err}`);
-      }
-    })().catch((err) => this.logger.error(`xdr_manager: unexpected ISM startup chain error: ${err}`));
+    // Routes await provisioning, so a startup race cannot create plain indices
+    // where data streams should be. Health/enrollment do not wait on ingestion.
+    const client = core.opensearch.client.asInternalUser;
+    // The first policy may initialize ISM's system index; serialize that work.
+    void (async () => {
+      await installTelemetryIsmPolicy(client, this.logger);
+      await installSecurityIsmPolicy(client, this.logger);
+      await installAgentLogsIsmPolicy(client, this.logger);
+    })().then(this.ingestionResolve, (error) => {
+      this.ingestionReject(error);
+      this.logger.error(`xdr_manager: event data stream provisioning failed: ${error}`);
+    });
 
     return {};
   }

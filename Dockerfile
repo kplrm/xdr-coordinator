@@ -1,4 +1,4 @@
-ARG OSD_VERSION=3.5.0
+ARG OSD_VERSION=3.9.0
 FROM opensearchproject/opensearch-dashboards:${OSD_VERSION}
 
 # Build context must place the plugin ZIP at xdr-coordinator.zip

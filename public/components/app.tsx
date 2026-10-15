@@ -204,7 +204,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       const confirmed = window.confirm(
         i18n.translate('xdrCoordinator.removeAgentConfirm', {
           defaultMessage:
-            'Remove agent "{name}"? The plugin will forget this agent and further heartbeats and telemetry from it will be rejected.',
+            'Remove agent "{name}"? Coordinator will revoke its enrollment token. Direct OpenSearch credentials must be revoked separately.',
           values: { name: agent.name },
         })
       );
@@ -744,7 +744,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       const confirmed = window.confirm(
         i18n.translate('xdrCoordinator.revokeTokenConfirm', {
           defaultMessage:
-            'Revoke this enrollment token? It will no longer be accepted for enrollment.',
+            'Revoke this token? Coordinator will reject enrollment and agent requests. Direct OpenSearch credentials must be revoked separately.',
         })
       );
       if (!confirmed) return;

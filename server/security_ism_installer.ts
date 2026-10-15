@@ -1,51 +1,11 @@
-/**
- * Sets up an OpenSearch ISM policy and index template for XDR security
- * events stored under `.xdr-agent-security-*`.
- */
+/** Mappings, data stream and retention for XDR security. */
 
-import { Logger } from '../../OpenSearch-Dashboards/src/core/server';
-
-const ISM_POLICY_ID = 'xdr-security-retention';
-const INDEX_TEMPLATE_NAME = 'xdr-security-template';
-const INDEX_PATTERN = '.xdr-agent-security-*';
-
-function buildIsmPolicy() {
-  return {
-    policy: {
-      description: 'Retain XDR security indices for 90 days, then delete.',
-      default_state: 'hot',
-      states: [
-        {
-          name: 'hot',
-          actions: [],
-          transitions: [
-            {
-              state_name: 'delete',
-              conditions: {
-                min_index_age: '90d',
-              },
-            },
-          ],
-        },
-        {
-          name: 'delete',
-          actions: [{ delete: {} }],
-          transitions: [],
-        },
-      ],
-      ism_template: [
-        {
-          index_patterns: [INDEX_PATTERN],
-          priority: 110,
-        },
-      ],
-    },
-  };
-}
+import type { Logger } from '../../OpenSearch-Dashboards/src/core/server';
+import { installEventDataStream } from './event_data_stream';
 
 function buildIndexTemplate() {
   return {
-    index_patterns: [INDEX_PATTERN],
+    index_patterns: ['xdr-agent-security'],
     priority: 110,
     template: {
       settings: {
@@ -54,7 +14,6 @@ function buildIndexTemplate() {
         'index.hidden': true,
         // Prevent malformed scalar parsing from rejecting entire documents.
         'index.mapping.ignore_malformed': true,
-        'opendistro.index_state_management.policy_id': ISM_POLICY_ID,
       },
       mappings: {
         dynamic: true,
@@ -74,6 +33,7 @@ function buildIndexTemplate() {
           },
         ],
         properties: {
+          id: { type: 'keyword' },
           '@timestamp': { type: 'date' },
           'event.type': { type: 'keyword' },
           'event.category': { type: 'keyword' },
@@ -156,34 +116,5 @@ export async function installSecurityIsmPolicy(
   opensearchClient: any,
   logger: Logger
 ): Promise<void> {
-  const isPolicyAlreadyExistsError = (err: any): boolean => {
-    const statusCode = err?.statusCode ?? err?.meta?.statusCode;
-    const message = String(err?.message ?? err?.meta?.body?.error?.reason ?? '').toLowerCase();
-    return statusCode === 409 || message.includes('version conflict') || message.includes('already exists');
-  };
-
-  try {
-    await opensearchClient.transport.request({
-      method: 'PUT',
-      path: `/_plugins/_ism/policies/${ISM_POLICY_ID}`,
-      body: buildIsmPolicy(),
-    });
-    logger.info(`xdr_manager: upserted ISM policy [${ISM_POLICY_ID}] (90-day retention)`);
-  } catch (err: any) {
-    if (isPolicyAlreadyExistsError(err)) {
-      logger.debug(`xdr_manager: ISM policy [${ISM_POLICY_ID}] already exists/conflicted during startup`);
-    } else {
-      logger.warn(`xdr_manager: failed to upsert ISM policy: ${err}`);
-    }
-  }
-
-  try {
-    await opensearchClient.indices.putIndexTemplate({
-      name: INDEX_TEMPLATE_NAME,
-      body: buildIndexTemplate(),
-    });
-    logger.info(`xdr_manager: installed index template [${INDEX_TEMPLATE_NAME}]`);
-  } catch (err) {
-    logger.warn(`xdr_manager: failed to install index template: ${err}`);
-  }
+  await installEventDataStream(opensearchClient, logger, 'security', buildIndexTemplate());
 }
