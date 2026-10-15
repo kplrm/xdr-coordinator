@@ -22,6 +22,7 @@ const { summarizeBulkFailures } = require('../server/bulk_index_error.ts');
 const { installTelemetryIsmPolicy } = require('../server/telemetry_ism_installer.ts');
 const { installSecurityIsmPolicy } = require('../server/security_ism_installer.ts');
 const { installAgentLogsIsmPolicy } = require('../server/logs_ism_installer.ts');
+const { installEventIndexPatterns } = require('../server/event_index_pattern_installer.ts');
 const {
   XDR_AGENT_SAVED_OBJECT_TYPE: AGENT,
   XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE: TOKEN,
@@ -338,6 +339,37 @@ test('stream provisioning targets stream names and preserves configured retentio
     assert.ok(calls.some((request) => request.path === `/_data_stream/xdr-agent-${topic}`));
     assert.ok(calls.every((request) => !request.path.includes('homelab')));
     assert.ok(calls.find((request) => request.body?.policy).path.includes('if_seq_no=7&if_primary_term=2'));
+  }
+});
+
+test('startup installs Discover views for all streams and upgrades existing management views', async () => {
+  const objects = new Map([
+    ['xdr-agent-logs-hidden', { attributes: { title: '.xdr-agent-logs-*' } }],
+    ['xdr-agent-security-hidden', { attributes: { title: '.xdr-agent-security-*' } }],
+  ]);
+  const repo = { bulkCreate: async (patterns, options) => {
+    for (const pattern of patterns) {
+      assert.ok(options.overwrite || !objects.has(pattern.id));
+      objects.set(pattern.id, structuredClone(pattern));
+    }
+    return { saved_objects: patterns };
+  } };
+  const logger = { info() {}, warn: assert.fail, error: assert.fail };
+  const fields = [{ name: '@timestamp', type: 'date', searchable: true, aggregatable: true }];
+  const requested = new Set();
+  const getFields = async (pattern) => { requested.add(pattern); return fields; };
+  await installEventIndexPatterns(repo, logger, getFields);
+  await installEventIndexPatterns(repo, logger, getFields);
+  assert.equal(objects.size, 4, 'restart must not create duplicate views');
+  assert.deepEqual([...objects.values()].map((view) => view.attributes.title).sort(), [
+    'xdr-agent-*', 'xdr-agent-logs', 'xdr-agent-security', 'xdr-agent-telemetry',
+  ]);
+  for (const view of objects.values()) {
+    assert.ok(requested.has(view.attributes.title));
+    assert.equal(view.type, 'index-pattern');
+    assert.equal(view.attributes.timeFieldName, '@timestamp');
+    assert.deepEqual(JSON.parse(view.attributes.fields), fields, 'Discover needs mapped fields immediately');
+    assert.deepEqual(view.references, []);
   }
 });
 

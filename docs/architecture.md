@@ -10,6 +10,8 @@ Coordinator provisions `xdr-agent-telemetry`, `xdr-agent-security` and `xdr-agen
 
 The three XDR retention policies roll streams over at 10 GB or seven days, then delete backing indices at 90 days from index creation by default. Operator retention changes are preserved. Templates, permissions, searches and Dashboards data views target stream names only. Dashboards calls these views `index-pattern` saved objects even for streams. XDR does not create `homelab-30d` or configure Query Insights.
 
+After provisioning the streams, Coordinator installs Global-tenant Discover index patterns: `xdr-agent-*` for all Agent events and one for each stream. They use `@timestamp`; the user's default pattern is unchanged. Defense queries the telemetry stream directly and builds its search controls from that same stream's fields.
+
 Process and parent-process command lines and arguments use `keyword` mappings with `ignore_above: 8191` to stay below Lucene's 32,766-byte term limit, including Unicode. Longer values remain complete in `_source` for inspection, but cannot be searched or aggregated as keywords. Startup updates both the telemetry template and those mapping parameters on existing hidden telemetry indices. Bulk failures log bounded samples of HTTP status, field name, and exception types without event values.
 
 For a local deployment, rebuild the coordinator ZIP against the stack's Dashboards version, then rebuild and recreate the Dashboards container using the [local stack deployment steps](../../opensearch/README.md#build-xdr-plugin-artifacts). The startup mapping repair lets queued events retry successfully without restarting or re-enrolling the endpoint.

@@ -6,11 +6,13 @@ import {
   PluginInitializerContext,
   ISavedObjectsRepository,
 } from '../../OpenSearch-Dashboards/src/core/server';
+// Runtime imports resolve from plugins/<id>/server in the Dashboards installation.
+import { IndexPatternsFetcher } from '../../../src/plugins/data/server';
 import { defineRoutes } from './routes';
 import { installTelemetryIsmPolicy } from './telemetry_ism_installer';
 import { installSecurityIsmPolicy } from './security_ism_installer';
 import { installAgentLogsIsmPolicy } from './logs_ism_installer';
-import { installManagementIndexPatterns } from './management_index_pattern_installer';
+import { installEventIndexPatterns } from './event_index_pattern_installer';
 import { XdrManagerPluginSetup, XdrManagerPluginStart } from './types';
 import { XDR_AGENT_SAVED_OBJECT_TYPE, XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE, XDR_POLICY_SAVED_OBJECT_TYPE } from '../common';
 
@@ -100,11 +102,6 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
     // Resolve the promise so route handlers can use it
     this.agentRepoResolve(repo);
 
-    // Install out-of-the-box hidden index patterns for logs and security views.
-    installManagementIndexPatterns(repo, this.logger).catch((err) =>
-      this.logger.error(`xdr_manager: management index-pattern install failed: ${err}`)
-    );
-
     // Routes await provisioning, so a startup race cannot create plain indices
     // where data streams should be. Health/enrollment do not wait on ingestion.
     const client = core.opensearch.client.asInternalUser;
@@ -113,6 +110,12 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
       await installTelemetryIsmPolicy(client, this.logger);
       await installSecurityIsmPolicy(client, this.logger);
       await installAgentLogsIsmPolicy(client, this.logger);
+      // Default Discover views live in the Global tenant, alongside these
+      // provisioned streams. Do not replace the user's default Discover view.
+      const fields = new IndexPatternsFetcher(core.opensearch.legacy.client.callAsInternalUser);
+      await installEventIndexPatterns(repo, this.logger, (pattern) => fields.getFieldsForWildcard({
+        pattern, metaFields: ['_id', '_index', '_source', '_score'],
+      }));
     })().then(this.ingestionResolve, (error) => {
       this.ingestionReject(error);
       this.logger.error(`xdr_manager: event data stream provisioning failed: ${error}`);
