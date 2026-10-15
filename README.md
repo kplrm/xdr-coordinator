@@ -2,7 +2,7 @@
 
 Coordinator manages Linux XDR Agent enrollment, health, upgrades and grouping policies. It provisions event data streams and accepts event batches when direct OpenSearch ingestion is disabled. Policies are grouping labels; protection content ships with agent releases.
 
-Startup also installs retention policies and Discover index patterns. In the **Global tenant**, open **Discover** and select `xdr-agent-*` for all Agent events, or an individual stream; time filtering uses `@timestamp`.
+Startup installs retention policies and three Discover patterns in Global and each Private tenant on first use: `xdr-agent-logs`, `xdr-agent-security` and `xdr-agent-telemetry` (initial default). Existing patterns and user-selected defaults are preserved. Hover an Agent's status to see reported health issues.
 
 - [Architecture](docs/architecture.md)
 - [API and data model](docs/api-data-model.md)

@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const https = require('node:https');
+const { EventEmitter } = require('node:events');
 const { test } = require('node:test');
 
 // Load the real TypeScript routes without starting OpenSearch Dashboards.
@@ -23,6 +25,7 @@ const { installTelemetryIsmPolicy } = require('../server/telemetry_ism_installer
 const { installSecurityIsmPolicy } = require('../server/security_ism_installer.ts');
 const { installAgentLogsIsmPolicy } = require('../server/logs_ism_installer.ts');
 const { installEventIndexPatterns } = require('../server/event_index_pattern_installer.ts');
+const { XdrManagerPlugin: BrowserPlugin } = require('../public/plugin.ts');
 const {
   XDR_AGENT_SAVED_OBJECT_TYPE: AGENT,
   XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE: TOKEN,
@@ -152,6 +155,42 @@ const event = (module, kind = 'event') => ({
   payload: {},
 });
 
+test('Agent version comes from VERSION, rejects invalid responses and is cached', async (t) => {
+  let reply;
+  const requests = [];
+  t.mock.method(https, 'request', (options, onResponse) => {
+    requests.push(options);
+    const request = new EventEmitter();
+    request.setTimeout = () => request;
+    request.end = () => queueMicrotask(() => {
+      const response = new EventEmitter();
+      response.statusCode = reply.status;
+      onResponse(response);
+      response.emit('data', Buffer.from(reply.body));
+      response.emit('end');
+    });
+    return request;
+  });
+  const f = fixture();
+  for (reply of [
+    { status: 404, body: '1.2.3' },
+    { status: 200, body: '{"tag_name":"v1.2.3"}' },
+    { status: 200, body: '1.2.3;id' },
+  ]) {
+    assert.equal((await f.call('GET /api/xdr_manager/version/latest')).status, 502);
+  }
+  reply = { status: 200, body: '1.2.3\n' };
+  assert.deepEqual(await f.call('GET /api/xdr_manager/version/latest'), {
+    status: 200, body: { version: '1.2.3' },
+  });
+  assert.equal((await f.call('GET /api/xdr_manager/agents')).body.latestVersion, '1.2.3');
+  assert.equal(requests.length, 4, 'valid VERSION should be cached across routes');
+  for (const request of requests) {
+    assert.equal(request.hostname, 'raw.githubusercontent.com');
+    assert.equal(request.path, '/kplrm/xdr-agent/main/VERSION');
+  }
+});
+
 test('bulk diagnostics identify status, field and causes without logging event values', () => {
   const error = { index: { status: 400, error: {
     type: 'mapper_parsing_exception',
@@ -251,6 +290,26 @@ test('heartbeat records degraded health and retains the assigned group; command 
   assert.equal(done.body.pending_commands, undefined);
 });
 
+test('detection mode does not degrade an Agent for intentionally disabled execution blocking', async () => {
+  const f = fixture();
+  await f.seed();
+  const protection = {
+    rule_source: 'YARA', rule_version: 'bundled', rule_count: 10, rules_sha256: 'a'.repeat(64),
+    platform: 'linux', mode: 'detect', health: { yara: 'running', execution_blocking: 'disabled' },
+  };
+  for (const version of ['0.4.3', '99.0.0']) {
+    await f.call(expected[1], { body: { ...identity, agent_version: version, protection } });
+    assert.equal((await f.repo.get(AGENT, 'agent-1')).attributes.status, 'healthy');
+  }
+  for (const bad of [
+    { ...protection, mode: 'prevent' },
+    { ...protection, health: { yara: 'degraded: scan error', execution_blocking: 'disabled' } },
+  ]) {
+    await f.call(expected[1], { body: { ...identity, protection: bad } });
+    assert.equal((await f.repo.get(AGENT, 'agent-1')).attributes.status, 'degraded');
+  }
+});
+
 // Each intake route must authenticate, normalize the owner, reject wrong topics, and report bulk errors.
 for (const [topic, module, kind] of [
   ['telemetry', 'telemetry.process', 'event'],
@@ -344,25 +403,30 @@ test('stream provisioning targets stream names and preserves configured retentio
 
 test('startup installs Discover views for all streams and upgrades existing management views', async () => {
   const objects = new Map([
+    ['xdr-agent-events', { attributes: { title: 'xdr-agent-*' } }],
     ['xdr-agent-logs-hidden', { attributes: { title: '.xdr-agent-logs-*' } }],
     ['xdr-agent-security-hidden', { attributes: { title: '.xdr-agent-security-*' } }],
   ]);
-  const repo = { bulkCreate: async (patterns, options) => {
-    for (const pattern of patterns) {
-      assert.ok(options.overwrite || !objects.has(pattern.id));
-      objects.set(pattern.id, structuredClone(pattern));
-    }
-    return { saved_objects: patterns };
-  } };
+  const repo = {
+    find: async () => ({ saved_objects: [...objects].map(([id, value]) => ({ ...value, id })) }),
+    delete: async (_, id) => objects.delete(id),
+    bulkCreate: async (patterns, options) => {
+      for (const pattern of patterns) {
+        assert.ok(options.overwrite || !objects.has(pattern.id));
+        objects.set(pattern.id, structuredClone(pattern));
+      }
+      return { saved_objects: patterns };
+    },
+  };
   const logger = { info() {}, warn: assert.fail, error: assert.fail };
   const fields = [{ name: '@timestamp', type: 'date', searchable: true, aggregatable: true }];
   const requested = new Set();
   const getFields = async (pattern) => { requested.add(pattern); return fields; };
   await installEventIndexPatterns(repo, logger, getFields);
   await installEventIndexPatterns(repo, logger, getFields);
-  assert.equal(objects.size, 4, 'restart must not create duplicate views');
+  assert.equal(objects.size, 3, 'restart must not create duplicate views or retain the combined default');
   assert.deepEqual([...objects.values()].map((view) => view.attributes.title).sort(), [
-    'xdr-agent-*', 'xdr-agent-logs', 'xdr-agent-security', 'xdr-agent-telemetry',
+    'xdr-agent-logs', 'xdr-agent-security', 'xdr-agent-telemetry',
   ]);
   for (const view of objects.values()) {
     assert.ok(requested.has(view.attributes.title));
@@ -370,6 +434,45 @@ test('startup installs Discover views for all streams and upgrades existing mana
     assert.equal(view.attributes.timeFieldName, '@timestamp');
     assert.deepEqual(JSON.parse(view.attributes.fields), fields, 'Discover needs mapped fields immediately');
     assert.deepEqual(view.references, []);
+  }
+});
+
+test('tenant setup reuses manual views and surfaces failures so a later visit can retry', async () => {
+  const repo = {
+    find: async () => {
+      if (fail) throw new Error('temporary storage error');
+      return { saved_objects: ['telemetry', 'logs', 'security'].map((topic) => ({
+        id: `manual-${topic}`, attributes: { title: `xdr-agent-${topic}`, fields: '["customized"]' },
+      })) };
+    },
+    bulkCreate: () => assert.fail('Manual views must not be replaced'),
+  };
+  const logger = { info() {}, error() {} };
+  let fail = true;
+  await assert.rejects(installEventIndexPatterns(repo, logger, async () => []), /temporary storage error/);
+  fail = false;
+  const ids = await installEventIndexPatterns(repo, logger, async () => []);
+  assert.equal(ids['xdr-agent-telemetry'], 'manual-telemetry');
+  assert.equal(ids['xdr-agent-security'], 'manual-security');
+});
+
+test('browser startup prepares the selected tenant before Discover and preserves an existing default', async () => {
+  for (const initial of [undefined, 'operator-default', 'xdr-agent-events']) {
+    let value = initial;
+    let completed = false;
+    await new BrowserPlugin().start({
+      application: { capabilities: { indexPatterns: { save: true } } },
+      http: { post: async (path) => {
+        assert.equal(path, '/api/xdr_manager/setup');
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        completed = true;
+        return { telemetryId: 'manual-telemetry' };
+      } },
+      uiSettings: { get: () => value, set: async (_, id) => { value = id; } },
+      notifications: { toasts: { addWarning: assert.fail } },
+    });
+    assert.ok(completed, 'Discover must wait for tenant initialization');
+    assert.equal(value, !initial || initial === 'xdr-agent-events' ? 'manual-telemetry' : initial);
   }
 });
 

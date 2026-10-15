@@ -37,6 +37,7 @@ import { BrowserRouter as Router } from 'react-router-dom';
 import { CoreStart } from '../../../OpenSearch-Dashboards/src/core/public';
 import {
   EnrollmentTokenStatusResponse,
+  agentHealthIssues,
   GenerateEnrollmentTokenResponse,
   ListAgentsResponse,
   ListEnrollmentTokensResponse,
@@ -125,6 +126,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
   const [policyId, setPolicyId] = useState('');
   const [tagsText, setTagsText] = useState('linux,production');
   const [controlPlaneUrl, setControlPlaneUrl] = useState('');
+  const suggestedControlPlaneUrl = `${window.location.origin}${http.basePath.get()}`;
   const [enrollmentToken, setEnrollmentToken] = useState('');
   const [tokenPolicyId, setTokenPolicyId] = useState('');
   const [tokenConsumedHostname, setTokenConsumedHostname] = useState('');
@@ -549,7 +551,14 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     {
       field: 'status',
       name: i18n.translate('xdrCoordinator.column.status', { defaultMessage: 'Status' }),
-      render: (status: string) => <EuiBadge color={statusColorMap[status] ?? 'hollow'}>{status}</EuiBadge>,
+      render: (status: string, agent: XdrAgent) => {
+        const issues = agentHealthIssues(agent.protection);
+        return <EuiToolTip content={issues.length
+          ? <div>{issues.map((issue) => <div key={issue}>{issue}</div>)}</div>
+          : `Agent health: ${status}`}>
+          <EuiBadge color={statusColorMap[status] ?? 'hollow'}>{status}</EuiBadge>
+        </EuiToolTip>;
+      },
     },
     {
       field: 'version',
@@ -1162,7 +1171,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
                 <EuiTitle size="m">
                   <h2>
                     {i18n.translate('xdrCoordinator.enrollFlyoutTitle', {
-                      defaultMessage: 'Enroll new XDR',
+                      defaultMessage: 'Enroll new XDR Agent',
                     })}
                   </h2>
                 </EuiTitle>
@@ -1215,7 +1224,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
                     <EuiFieldText
                       value={controlPlaneUrl}
                       onChange={(event) => setControlPlaneUrl(event.target.value)}
-                      placeholder="http://localhost:5601"
+                      placeholder={suggestedControlPlaneUrl}
                     />
                   </EuiFormRow>
 
@@ -1293,16 +1302,19 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
                           </strong>
                         </EuiText>
                         <EuiSpacer size="xs" />
-                        <EuiCodeBlock language="bash" isCopyable>
-                          {[
-                            'VER=$(curl -fsSL https://api.github.com/repos/kplrm/xdr-agent/releases/latest | grep \'"tag_name"\' | sed \'s/.*"v\\([^"]*\\)".*/\\1/\')',
-                            'ARCH=$([ "$(uname -m)" = x86_64 ] && echo amd64 || echo arm64)',
-                            'GH="https://github.com/kplrm/xdr-agent/releases/download/v${VER}"',
-                            'command -v dpkg &>/dev/null \\',
-                            '  && { curl -fsSLo /tmp/xdr.deb "$GH/xdr-agent_${VER}_${ARCH}.deb" && sudo dpkg -i /tmp/xdr.deb; } \\',
-                            '  || { curl -fsSLo /tmp/xdr.rpm "$GH/xdr-agent-${VER}-1.$([ \\"$ARCH\\" = amd64 ] && echo x86_64 || echo aarch64).rpm" && sudo rpm -ivh /tmp/xdr.rpm; }',
-                          ].join('\n')}
-                        </EuiCodeBlock>
+                        {latestVersion ? (
+                          (['amd64', 'arm64'] as const).map((arch) => (
+                            <React.Fragment key={arch}>
+                              <EuiText size="s"><p>{arch === 'amd64' ? 'AMD64 (x86_64)' : 'ARM64 (aarch64)'}</p></EuiText>
+                              <EuiCodeBlock language="bash" isCopyable>
+                                {`curl -fL -o /tmp/xdr-agent-${arch}.deb https://github.com/kplrm/xdr-agent/releases/download/v${latestVersion}/xdr-agent_${latestVersion}_${arch}.deb &&
+sudo apt install /tmp/xdr-agent-${arch}.deb`}
+                              </EuiCodeBlock>
+                            </React.Fragment>
+                          ))
+                        ) : (
+                          <EuiText size="s"><p>Waiting for the Agent VERSION from GitHub. Retrying automatically.</p></EuiText>
+                        )}
                         <EuiSpacer size="m" />
                         <EuiText size="s">
                           <strong>
@@ -1314,7 +1326,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
                         <EuiSpacer size="xs" />
                         <EuiCodeBlock language="bash" isCopyable>
                           {`sudo xdr-agent enroll ${enrollmentToken} \\
-  --control-plane-url=${controlPlaneUrl || window.location.origin} \\
+  --control-plane-url=${controlPlaneUrl || suggestedControlPlaneUrl} \\
   --policy-id=${tokenPolicyId}${tagsText.trim() ? ` \\
   --tags=${tagsText.trim()}` : ''}`}
                         </EuiCodeBlock>

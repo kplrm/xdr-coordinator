@@ -6,3 +6,4 @@ export const XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE = 'xdr-enrollment-token';
 export const XDR_POLICY_SAVED_OBJECT_TYPE = 'xdr-agent-policy';
 
 export * from './types';
+export * from './health';

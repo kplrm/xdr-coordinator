@@ -5,6 +5,7 @@ import { summarizeBulkFailures } from '../bulk_index_error';
 import { EVENT_STREAMS } from '../event_data_stream';
 import { IRouter, ISavedObjectsRepository, Logger } from '../../../OpenSearch-Dashboards/src/core/server';
 import {
+  agentHealthIssues,
   AgentStatus,
   ControlPlaneHeartbeatRequest,
   ControlPlaneHeartbeatResponse,
@@ -67,7 +68,7 @@ type EnrollmentTokenAttributes = {
   consumedHostname?: string;
 };
 
-// GitHub latest-release cache (refreshed at most once per minute).
+// The Agent's VERSION file is authoritative, independently of plugin versions.
 interface VersionCache {
   version: string;
   fetchedAt: number;
@@ -78,8 +79,8 @@ const VERSION_CACHE_TTL_MS = 60_000;
 function fetchLatestVersionFromGitHub(): Promise<string> {
   return new Promise((resolve, reject) => {
     const options = {
-      hostname: 'api.github.com',
-      path: '/repos/kplrm/xdr-agent/releases/latest',
+      hostname: 'raw.githubusercontent.com',
+      path: '/kplrm/xdr-agent/main/VERSION',
       method: 'GET',
       headers: { 'User-Agent': 'xdr-coordinator' },
     };
@@ -87,22 +88,15 @@ function fetchLatestVersionFromGitHub(): Promise<string> {
       let data = '';
       res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
       res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          const tagName: string = parsed.tag_name ?? '';
-          // Strip leading 'v' if present
-          const version = tagName.startsWith('v') ? tagName.slice(1) : tagName;
-          if (!version) {
-            reject(new Error(`Could not parse tag_name from GitHub response`));
-          } else {
-            resolve(version);
-          }
-        } catch (err) {
-          reject(err);
+        const version = data.trim();
+        if (res.statusCode !== 200 || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+          reject(new Error('Could not read a valid xdr-agent VERSION from GitHub'));
+        } else {
+          resolve(version);
         }
       });
     });
-    req.setTimeout(10000, () => req.destroy(new Error('GitHub release lookup timed out')));
+    req.setTimeout(10000, () => req.destroy(new Error('GitHub VERSION lookup timed out')));
     req.on('error', reject);
     req.end();
   });
@@ -566,7 +560,7 @@ export function defineRoutes(
 
       await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, payload.agent_id, {
         name: payload.hostname,
-        status: Object.values(payload.protection?.health ?? {}).some((value) => /^(degraded|failed|stopped|unknown|disabled)/.test(value)) ? 'degraded' : 'healthy',
+        status: agentHealthIssues(payload.protection).length ? 'degraded' : 'healthy',
         lastSeen: new Date().toISOString(),
         tags: payload.tags,
         version: payload.agent_version,
@@ -660,7 +654,7 @@ export function defineRoutes(
         sortOrder: 'desc',
       });
 
-      // Fetch latest version from GitHub (non-blocking — use cached value on error)
+      // Read the Agent VERSION independently of the installed plugin version.
       let latestVersion: string | undefined;
       try {
         latestVersion = await getCachedLatestVersion();
@@ -1070,7 +1064,7 @@ export function defineRoutes(
   );
 
   // ── GET /api/xdr_manager/version/latest ────────────────────────────────
-  // Returns the latest xdr-agent version from GitHub releases (cached).
+  // Returns xdr-agent's authoritative VERSION (cached for one minute).
 
   router.get(
     {

@@ -7,12 +7,14 @@ import {
   ISavedObjectsRepository,
 } from '../../OpenSearch-Dashboards/src/core/server';
 // Runtime imports resolve from plugins/<id>/server in the Dashboards installation.
+import { SavedObjectsClient } from '../../../src/core/server';
 import { IndexPatternsFetcher } from '../../../src/plugins/data/server';
 import { defineRoutes } from './routes';
 import { installTelemetryIsmPolicy } from './telemetry_ism_installer';
 import { installSecurityIsmPolicy } from './security_ism_installer';
 import { installAgentLogsIsmPolicy } from './logs_ism_installer';
 import { installEventIndexPatterns } from './event_index_pattern_installer';
+import { EVENT_STREAMS } from './event_data_stream';
 import { XdrManagerPluginSetup, XdrManagerPluginStart } from './types';
 import { XDR_AGENT_SAVED_OBJECT_TYPE, XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE, XDR_POLICY_SAVED_OBJECT_TYPE } from '../common';
 
@@ -86,6 +88,26 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
     const router = core.http.createRouter();
     defineRoutes(router, this.logger, this.agentRepoPromise, this.ingestionReady);
 
+    // Browser startup calls this once for its selected tenant, including Private.
+    // Security's XDR role guard and the scoped client enforce caller permissions.
+    router.post({ path: '/api/xdr_manager/setup', validate: false }, async (context, _request, response) => {
+      try {
+        await this.ingestionReady;
+        const fields = new IndexPatternsFetcher(context.core.opensearch.legacy.client.callAsCurrentUser);
+        const ids = await installEventIndexPatterns(context.core.savedObjects.client, this.logger,
+          (pattern) => fields.getFieldsForWildcard({ pattern, metaFields: ['_id', '_index', '_source', '_score'] }));
+        const currentDefault = await context.core.uiSettings.client.get('defaultIndex');
+        if (!currentDefault || currentDefault === 'xdr-agent-events') {
+          await context.core.uiSettings.client.set('defaultIndex', ids[EVENT_STREAMS.telemetry]);
+        }
+        return response.ok({ body: { telemetryId: ids[EVENT_STREAMS.telemetry] } });
+      } catch (error: any) {
+        const status = error.statusCode ?? error.meta?.statusCode;
+        return response.customError({ statusCode: status === 403 ? 403 : 500,
+          body: { message: 'Unable to initialize XDR Discover patterns. Check tenant permissions and Dashboards logs.' } });
+      }
+    });
+
     return {};
   }
 
@@ -110,15 +132,19 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
       await installTelemetryIsmPolicy(client, this.logger);
       await installSecurityIsmPolicy(client, this.logger);
       await installAgentLogsIsmPolicy(client, this.logger);
+      this.ingestionResolve();
       // Default Discover views live in the Global tenant, alongside these
       // provisioned streams. Do not replace the user's default Discover view.
       const fields = new IndexPatternsFetcher(core.opensearch.legacy.client.callAsInternalUser);
-      await installEventIndexPatterns(repo, this.logger, (pattern) => fields.getFieldsForWildcard({
+      const ids = await installEventIndexPatterns(repo, this.logger, (pattern) => fields.getFieldsForWildcard({
         pattern, metaFields: ['_id', '_index', '_source', '_score'],
       }));
-    })().then(this.ingestionResolve, (error) => {
+      const settings = core.uiSettings.asScopedToClient(new SavedObjectsClient(repo));
+      const currentDefault = await settings.get('defaultIndex');
+      if (!currentDefault || currentDefault === 'xdr-agent-events') await settings.set('defaultIndex', ids[EVENT_STREAMS.telemetry]);
+    })().catch((error) => {
       this.ingestionReject(error);
-      this.logger.error(`xdr_manager: event data stream provisioning failed: ${error}`);
+      this.logger.error(`xdr_manager: stream/Discover startup setup failed: ${error}`);
     });
 
     return {};

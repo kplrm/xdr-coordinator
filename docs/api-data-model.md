@@ -16,7 +16,8 @@ Operator routes use the normal Dashboards session:
 | PUT | `/api/xdr_manager/enrollment_tokens/{token}/tag` | Set descriptive tag |
 | DELETE | `/api/xdr_manager/enrollment_tokens/{token}` | Revoke token |
 | GET | `/api/xdr_manager/protections` | Read last reported installed protections |
-| GET | `/api/xdr_manager/version/latest` | Discover published agent version |
+| GET | `/api/xdr_manager/version/latest` | Read Agent repository `VERSION` (cached) |
+| POST | `/api/xdr_manager/setup` | Ensure Discover patterns in the caller's selected tenant; reuse manual patterns |
 
 Policies contain `id`, `name`, and `description` and persist as `xdr-agent-policy`. The built-in `default-endpoint` group cannot be deleted. Groups referenced by agents or tokens cannot be deleted.
 

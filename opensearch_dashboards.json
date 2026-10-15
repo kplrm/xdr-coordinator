@@ -1,6 +1,6 @@
 {
   "id": "xdrCoordinator",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "opensearchDashboardsVersion": "3.9.0",
   "server": true,
   "ui": true,
