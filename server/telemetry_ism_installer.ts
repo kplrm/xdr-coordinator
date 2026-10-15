@@ -3,7 +3,7 @@
 import type { Logger } from '../../OpenSearch-Dashboards/src/core/server';
 import { installEventDataStream } from './event_data_stream';
 
-const INDEX_PATTERN = 'xdr-agent-telemetry,.xdr-agent-telemetry-*';
+const INDEX_PATTERN = 'xdr-agent-telemetry';
 
 // Lucene terms are limited to 32,766 UTF-8 bytes. This character limit remains
 // safe even for four-byte Unicode characters. Full values remain in _source.
@@ -537,8 +537,7 @@ export async function installTelemetryIsmPolicy(
 ): Promise<void> {
   await installEventDataStream(opensearchClient, logger, 'telemetry', buildIndexTemplate());
 
-  // Template updates only apply to new indices. Repair existing hidden indices
-  // as well, so an already queued batch can succeed without waiting for rollover.
+  // Apply mapping changes to the stream's existing backing indices too.
   try {
     await opensearchClient.indices.putMapping({
       index: INDEX_PATTERN,
@@ -547,7 +546,7 @@ export async function installTelemetryIsmPolicy(
       ignore_unavailable: true,
       body: PROCESS_TEXT_MAPPING_UPDATE,
     });
-    logger.info('xdr_manager: applied safe process keyword limits to existing telemetry indices');
+    logger.info('xdr_manager: applied safe process keyword limits to the telemetry stream');
   } catch (err) {
     logger.warn(`xdr_manager: failed to update telemetry process keyword limits: ${err}`);
   }

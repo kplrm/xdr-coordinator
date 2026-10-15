@@ -11,31 +11,16 @@ const rollover = {
   transitions: [{ state_name: 'hot' }],
 };
 
-// Keep the old hot/delete states intact: daily indices already in hot must
-// retain their deletion schedule, rather than attempt to roll over without an alias.
+// Preserve configured retention limits while ensuring stream rollover is enabled.
 function streamPolicy(policy: any, stream: string, priority: number) {
   const result = JSON.parse(JSON.stringify(policy));
   delete result.policy_id;
   delete result.last_updated_time;
-  const hot = result.states.find((state: any) => state.name === 'hot');
-  if (result.default_state === 'hot' && hot?.actions?.length === 0 &&
-      hot.transitions?.some((transition: any) => transition.state_name === 'delete') &&
-      !result.states.some((state: any) => state.name === 'rollover')) {
-    result.default_state = 'rollover';
+  result.default_state = 'rollover';
+  if (!result.states.some((state: any) => state.name === 'rollover')) {
     result.states.unshift(rollover);
   }
-  // Older daily indices already assigned this policy keep their hot/delete
-  // states. Stop automatically assigning the new rollover state to daily indices.
-  const legacyPattern = `.${stream}-*`;
-  const templates = (result.ism_template || []).map((entry: any) => ({
-    ...entry, index_patterns: entry.index_patterns.filter((pattern: string) => pattern !== legacyPattern),
-  })).filter((entry: any) => entry.index_patterns.length > 0);
-  // Exact stream and backing-index names avoid claiming any unrelated indices.
-  const patterns = [stream, `.ds-${stream}-*`];
-  if (!templates.some((entry: any) => patterns.every((pattern) => entry.index_patterns.includes(pattern)))) {
-    templates.push({ index_patterns: patterns, priority });
-  }
-  result.ism_template = templates;
+  result.ism_template = [{ index_patterns: [stream], priority }];
   return result;
 }
 
@@ -78,7 +63,6 @@ export async function installEventDataStream(client: any, logger: Logger, topic:
   const body = JSON.parse(JSON.stringify(template));
   body.index_patterns = [stream];
   body.data_stream = {};
-  delete body.template.settings['opendistro.index_state_management.policy_id'];
   await client.indices.putIndexTemplate({ name: `xdr-${topic === 'logs' ? 'agent-logs' : topic}-template`, body });
   try {
     await client.transport.request({ method: 'PUT', path: `/_data_stream/${stream}` });

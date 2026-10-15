@@ -53,7 +53,7 @@ test('oversized process keywords reproduce bulk failure and survive mapping repa
     docs.push({ payload: { process: { parent: { args: ['short-argument', value] } } } });
   }
   docs.push({ payload: { process: { command_line: 'ordinary-command' } } });
-  const index = `.xdr-agent-telemetry-ingest-test-${randomUUID()}`;
+  const index = `xdr-keyword-ingest-test-${randomUUID()}`;
   const created = [];
   const create = async (name, mappings) => {
     await client.indices.create({ index: name, body: {

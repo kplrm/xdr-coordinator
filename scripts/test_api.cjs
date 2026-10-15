@@ -169,7 +169,7 @@ test('bulk diagnostics identify status, field and causes without logging event v
   } } }]))[0].causes[0], 'security_exception');
 });
 
-test('startup bounds process keywords in new and existing hidden telemetry indices', async () => {
+test('startup bounds process keywords in the template and telemetry stream', async () => {
   let template;
   let update;
   const warnings = [];
@@ -184,7 +184,7 @@ test('startup bounds process keywords in new and existing hidden telemetry indic
     },
   }, { info() {}, debug() {}, warn: (message) => warnings.push(message) });
   assert.deepEqual(warnings, []);
-  assert.equal(update.index, 'xdr-agent-telemetry,.xdr-agent-telemetry-*');
+  assert.equal(update.index, 'xdr-agent-telemetry');
   assert.equal(update.expand_wildcards, 'open,hidden');
   assert.equal(update.allow_no_indices, true);
   assert.equal(update.ignore_unavailable, true);
@@ -308,10 +308,11 @@ test('ingestion cannot create ordinary indices before stream provisioning comple
   assert.equal(f.batches.length, 0);
 });
 
-test('stream provisioning migrates XDR policies while preserving existing hot retention', async () => {
-  const legacy = {
-    description: 'Operator changed retention to 45 days', default_state: 'hot',
+test('stream provisioning targets stream names and preserves configured retention', async () => {
+  const configured = {
+    description: 'Operator changed retention to 45 days', default_state: 'rollover',
     states: [
+      { name: 'rollover', actions: [{ rollover: { min_size: '5gb' } }], transitions: [{ state_name: 'hot' }] },
       { name: 'hot', actions: [], transitions: [{ state_name: 'delete', conditions: { min_index_age: '45d' } }] },
       { name: 'delete', actions: [{ delete: {} }], transitions: [] },
     ],
@@ -319,7 +320,7 @@ test('stream provisioning migrates XDR policies while preserving existing hot re
   };
   for (const [topic, install] of [['telemetry', installTelemetryIsmPolicy], ['security', installSecurityIsmPolicy], ['logs', installAgentLogsIsmPolicy]]) {
     const calls = []; let template;
-    const original = { ...legacy, ism_template: [{ index_patterns: [`.xdr-agent-${topic}-*`], priority: 100 }] };
+    const original = { ...configured, ism_template: [] };
     await install({
       transport: { request: async (request) => {
         calls.push(request);
@@ -330,8 +331,8 @@ test('stream provisioning migrates XDR policies while preserving existing hot re
     }, { info() {}, debug() {}, warn: (message) => assert.fail(message) });
     const policy = calls.find((request) => request.body?.policy).body.policy;
     assert.equal(policy.default_state, 'rollover');
-    assert.deepEqual(policy.ism_template[0].index_patterns, [`xdr-agent-${topic}`, `.ds-xdr-agent-${topic}-*`]);
-    assert.deepEqual(policy.states.find((state) => state.name === 'hot'), legacy.states[0]);
+    assert.deepEqual(policy.ism_template[0].index_patterns, [`xdr-agent-${topic}`]);
+    assert.deepEqual(policy.states, configured.states);
     assert.deepEqual(template.data_stream, {});
     assert.deepEqual(template.index_patterns, [`xdr-agent-${topic}`]);
     assert.ok(calls.some((request) => request.path === `/_data_stream/xdr-agent-${topic}`));
