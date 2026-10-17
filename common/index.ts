@@ -4,6 +4,7 @@ export const XDR_AGENT_SAVED_OBJECT_TYPE = 'xdr-agent';
 export const XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE = 'xdr-enrollment-token';
 
 export const XDR_POLICY_SAVED_OBJECT_TYPE = 'xdr-agent-policy';
+export const UNMANAGED_CONFIG_REVISION = 'local-defaults';
 
 export * from './types';
 export * from './health';

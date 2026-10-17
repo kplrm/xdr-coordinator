@@ -1,6 +1,6 @@
 # XDR Coordinator
 
-Coordinator manages Linux XDR Agent enrollment, health, upgrades and grouping policies. It provisions event data streams and accepts event batches when direct OpenSearch ingestion is disabled. Policies are grouping labels; protection content ships with agent releases.
+Coordinator manages Linux XDR Agent enrollment, health, upgrades and policy settings. Edit a policy to update supported telemetry settings across its enrolled agents; the fleet shows application status. It provisions event data streams and accepts event batches when direct OpenSearch ingestion is disabled. Protection content ships with agent releases.
 
 Startup installs retention policies and three Discover patterns in Global and each Private tenant on first use: `xdr-agent-logs`, `xdr-agent-security` and `xdr-agent-telemetry` (initial default). Existing patterns and user-selected defaults are preserved. Hover an Agent's status to see reported health issues.
 

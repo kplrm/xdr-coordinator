@@ -58,6 +58,8 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
           enrollmentToken: { type: 'keyword' },
           pendingUpgradeVersion: { type: 'keyword' },
           protection: { type: 'object', enabled: false },
+          configRevision: { type: 'keyword' },
+          configError: { type: 'text', index: false },
         },
       },
     });
@@ -82,7 +84,10 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
 
     core.savedObjects.registerType({
       name: XDR_POLICY_SAVED_OBJECT_TYPE, hidden: true, namespaceType: 'agnostic',
-      mappings: { properties: { name: { type: 'keyword' }, description: { type: 'text' } } },
+      mappings: { properties: {
+        name: { type: 'keyword' }, description: { type: 'text' },
+        config: { type: 'object', enabled: false }, configRevision: { type: 'keyword' },
+      } },
     });
 
     const router = core.http.createRouter();

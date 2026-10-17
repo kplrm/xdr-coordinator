@@ -1,10 +1,25 @@
 export type AgentStatus = 'healthy' | 'degraded' | 'offline' | 'unseen';
 export type XdrAction = 'upgrade';
 
+export interface ManagedAgentConfig {
+  internal_networks?: string[];
+  process_scan_interval_seconds?: number;
+  network_scan_interval_seconds?: number;
+  telemetry_ship_interval_seconds?: number;
+}
+
+export interface ManagedConfigPolicy {
+  schema_version: 1;
+  revision: string;
+  settings: ManagedAgentConfig;
+}
+
 export interface XdrPolicy {
   id: string;
   name: string;
   description: string;
+  config?: ManagedAgentConfig;
+  configRevision?: string;
 }
 
 export interface ProtectionInventory {
@@ -28,6 +43,8 @@ export interface XdrAgent {
   enrollmentToken?: string;
   pendingUpgradeVersion?: string;
   protection?: ProtectionInventory;
+  configRevision?: string;
+  configError?: string;
 }
 
 export interface ListAgentsResponse {
@@ -98,11 +115,14 @@ export interface ControlPlaneHeartbeatRequest {
   tags: string[];
   agent_version: string;
   protection?: ProtectionInventory;
+  config_revision?: string;
+  config_error?: string;
 }
 
 export interface ControlPlaneHeartbeatResponse {
   message: string;
   pending_commands?: string[];
+  managed_config?: ManagedConfigPolicy;
 }
 
 export interface RunActionRequest {
@@ -145,6 +165,7 @@ export interface ListPoliciesResponse {
 export interface UpsertPolicyRequest {
   name: string;
   description: string;
+  config?: ManagedAgentConfig;
 }
 
 export interface UpsertPolicyResponse {

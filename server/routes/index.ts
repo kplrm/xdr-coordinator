@@ -1,5 +1,6 @@
 import { schema } from '@osd/config-schema';
 import { randomBytes } from 'crypto';
+import { isIP } from 'net';
 import * as https from 'https';
 import { summarizeBulkFailures } from '../bulk_index_error';
 import { EVENT_STREAMS } from '../event_data_stream';
@@ -19,11 +20,14 @@ import {
   LatestVersionResponse,
   ListAgentsResponse,
   ListEnrollmentTokensResponse,
+  ManagedAgentConfig,
+  ManagedConfigPolicy,
   RemoveAgentResponse,
   RunActionResponse,
   UpdateEnrollmentTokenTagRequest,
   UpsertPolicyRequest,
   UpsertPolicyResponse,
+  UNMANAGED_CONFIG_REVISION,
   XdrAgent,
   XdrPolicy,
   XDR_AGENT_SAVED_OBJECT_TYPE,
@@ -37,10 +41,12 @@ const defaultPolicy: XdrPolicy = {
   description: 'Default agent group.',
 };
 
-// Group labels are persisted; they never change endpoint protections.
+// Persisted policies can manage an allowlisted subset of runtime configuration.
 async function listPolicies(repo: ISavedObjectsRepository): Promise<XdrPolicy[]> {
   const result = await repo.find<Omit<XdrPolicy, 'id'>>({ type: XDR_POLICY_SAVED_OBJECT_TYPE, perPage: 10000 });
-  return [defaultPolicy, ...result.saved_objects.map((item) => ({ id: item.id, ...item.attributes }))];
+  const stored = result.saved_objects.map((item) => ({ id: item.id, ...item.attributes }));
+  return [stored.find((policy) => policy.id === defaultPolicy.id) ?? defaultPolicy,
+    ...stored.filter((policy) => policy.id !== defaultPolicy.id)];
 }
 
 type XdrAgentAttributes = Omit<XdrAgent, 'id'>;
@@ -55,6 +61,8 @@ function toXdrAgent(so: { id: string; attributes: XdrAgentAttributes }): XdrAgen
     tags: so.attributes.tags,
     version: so.attributes.version,
     protection: so.attributes.protection,
+    configRevision: so.attributes.configRevision,
+    configError: so.attributes.configError,
   };
 }
 
@@ -212,10 +220,52 @@ const authorizeAgentRequest = async (
   return { ok: true, agent };
 };
 
+const intervalSchema = schema.number({ min: 1, max: 86400,
+  validate: (value) => { if (!Number.isInteger(value)) return 'Expected whole seconds'; },
+});
+const managedConfigSchema = schema.object({
+  internal_networks: schema.maybe(schema.arrayOf(schema.string({
+    minLength: 3, maxLength: 64,
+    validate: (value) => {
+      const [address, prefix, extra] = value.split('/');
+      const family = isIP(address);
+      if (!family || address.includes('%') || extra !== undefined || !/^\d+$/.test(prefix ?? '') ||
+          Number(prefix) > (family === 4 ? 32 : 128)) return 'Expected an IPv4 or IPv6 CIDR';
+    },
+  }), { maxSize: 256 })),
+  process_scan_interval_seconds: schema.maybe(intervalSchema),
+  network_scan_interval_seconds: schema.maybe(intervalSchema),
+  telemetry_ship_interval_seconds: schema.maybe(intervalSchema),
+});
+
+function canonicalConfig(config: ManagedAgentConfig): string {
+  return JSON.stringify({
+    internal_networks: config.internal_networks,
+    process_scan_interval_seconds: config.process_scan_interval_seconds,
+    network_scan_interval_seconds: config.network_scan_interval_seconds,
+    telemetry_ship_interval_seconds: config.telemetry_ship_interval_seconds,
+  });
+}
+
+async function managedConfigForAgent(repo: ISavedObjectsRepository, agent: XdrAgentAttributes): Promise<ManagedConfigPolicy | undefined> {
+  // Release prior overrides when an agent moves to an unmanaged policy.
+  const unmanaged: ManagedConfigPolicy | undefined = agent.configRevision
+    ? { schema_version: 1, revision: UNMANAGED_CONFIG_REVISION, settings: {} }
+    : undefined;
+  try {
+    const policy = await repo.get<Omit<XdrPolicy, 'id'>>(XDR_POLICY_SAVED_OBJECT_TYPE, agent.policyId);
+    if (policy.attributes.config === undefined || !policy.attributes.configRevision) return unmanaged;
+    return { schema_version: 1, revision: policy.attributes.configRevision, settings: policy.attributes.config };
+  } catch (error: any) {
+    if (error?.output?.statusCode === 404) return unmanaged;
+    throw error;
+  }
+}
+
 const policyRequestSchema = schema.object({
   name: schema.string({ minLength: 1 }),
   description: schema.string({ minLength: 1 }),
-
+  config: schema.maybe(managedConfigSchema),
 });
 
 export function defineRoutes(
@@ -224,12 +274,11 @@ export function defineRoutes(
   agentRepoPromise: Promise<ISavedObjectsRepository>,
   ingestionReady: Promise<void> = Promise.resolve()
 ) {
-  const collectPendingCommands = async (agentId: string, agentVersion: string): Promise<string[]> => {
-    const repo = await agentRepoPromise;
-    const agent = await repo.get<XdrAgentAttributes>(XDR_AGENT_SAVED_OBJECT_TYPE, agentId);
-    const target = agent.attributes.pendingUpgradeVersion;
+  const collectPendingCommands = async (agentId: string, agentVersion: string, agent: XdrAgentAttributes): Promise<string[]> => {
+    const target = agent.pendingUpgradeVersion;
     if (!target) return [];
     if (target === agentVersion) {
+      const repo = await agentRepoPromise;
       await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, agentId, { pendingUpgradeVersion: '' });
       return [];
     }
@@ -527,6 +576,8 @@ export function defineRoutes(
           policy_id: schema.string({ minLength: 1 }),
           tags: schema.arrayOf(schema.string()),
           agent_version: schema.string({ minLength: 1 }),
+          config_revision: schema.maybe(schema.string({ minLength: 1, maxLength: 256 })),
+          config_error: schema.maybe(schema.string({ maxLength: 1024 })),
           protection: schema.maybe(schema.object({
             rule_source: schema.string(), rule_version: schema.string(),
             rule_count: schema.number({ min: 0 }), mode: schema.string(),
@@ -565,13 +616,19 @@ export function defineRoutes(
         tags: payload.tags,
         version: payload.agent_version,
         ...(payload.protection ? { protection: payload.protection } : {}),
+        ...(payload.config_revision !== undefined || payload.config_error !== undefined ? {
+          ...(payload.config_revision !== undefined ? { configRevision: payload.config_revision } : {}),
+          configError: payload.config_error ?? '',
+        } : {}),
       });
 
       let pendingCommands: string[] = [];
+      let managedConfig: ManagedConfigPolicy | undefined;
       try {
         pendingCommands = await collectPendingCommands(
           payload.agent_id,
-          payload.agent_version
+          payload.agent_version,
+          auth.agent.attributes
         );
       } catch (err: any) {
         // Keep heartbeat healthy even if command lookup fails.
@@ -579,10 +636,19 @@ export function defineRoutes(
         logger.warn(`heartbeat command lookup failed for agent ${payload.agent_id}: ${String(err?.message ?? err)}`);
         pendingCommands = [];
       }
+      try {
+        managedConfig = await managedConfigForAgent(repo, {
+          ...auth.agent.attributes,
+          ...(payload.config_revision !== undefined ? { configRevision: payload.config_revision } : {}),
+        });
+      } catch (err: any) {
+        logger.warn(`heartbeat policy lookup failed for agent ${payload.agent_id}: ${String(err?.message ?? err)}`);
+      }
 
       const body: ControlPlaneHeartbeatResponse = {
         message: `heartbeat accepted for ${payload.hostname}`,
         pending_commands: pendingCommands.length > 0 ? pendingCommands : undefined,
+        managed_config: managedConfig,
       };
 
       return response.ok({ body });
@@ -629,11 +695,12 @@ export function defineRoutes(
         });
       }
 
-      const pendingCommands = await collectPendingCommands(agent_id, agent_version);
+      const pendingCommands = await collectPendingCommands(agent_id, agent_version, auth.agent.attributes);
 
       const body: ControlPlaneHeartbeatResponse = {
         message: 'commands polled',
         pending_commands: pendingCommands.length > 0 ? pendingCommands : undefined,
+        managed_config: await managedConfigForAgent(repo, auth.agent.attributes),
       };
 
       return response.ok({ body });
@@ -716,8 +783,10 @@ export function defineRoutes(
       const newPolicy: XdrPolicy = {
         id,
         ...payload,
+        ...(payload.config !== undefined ? { configRevision: randomBytes(16).toString('hex') } : {}),
       };
-      await repo.create(XDR_POLICY_SAVED_OBJECT_TYPE, payload, { id });
+      const { id: _id, ...attributes } = newPolicy;
+      await repo.create(XDR_POLICY_SAVED_OBJECT_TYPE, attributes, { id });
 
       const body: UpsertPolicyResponse = {
         policy: newPolicy,
@@ -739,21 +808,32 @@ export function defineRoutes(
     },
     async (_context, request, response) => {
       const repo = await agentRepoPromise;
-      const policies = await listPolicies(repo);
-      const policy = policies.find((item) => item.id === request.params.id);
-
-      if (!policy) {
-        return response.notFound({
-          body: `Policy [${request.params.id}] not found`,
-        });
+      let stored;
+      try {
+        stored = await repo.get<Omit<XdrPolicy, 'id'>>(XDR_POLICY_SAVED_OBJECT_TYPE, request.params.id);
+      } catch (error: any) {
+        if (error?.output?.statusCode !== 404) throw error;
+        if (request.params.id !== defaultPolicy.id) {
+          return response.notFound({ body: `Policy [${request.params.id}] not found` });
+        }
       }
+      const policy: XdrPolicy = stored ? { id: stored.id, ...stored.attributes } : { ...defaultPolicy };
 
-      if (policy.id === defaultPolicy.id) {
-        return response.badRequest({ body: 'The default group cannot be edited' });
-      }
       const payload = request.body as UpsertPolicyRequest;
-      await repo.update(XDR_POLICY_SAVED_OBJECT_TYPE, policy.id, payload);
-      Object.assign(policy, payload);
+      const update = {
+        name: payload.name, description: payload.description,
+        ...(payload.config !== undefined ? { config: payload.config,
+          ...(policy.config === undefined || canonicalConfig(policy.config) !== canonicalConfig(payload.config)
+            ? { configRevision: randomBytes(16).toString('hex') } : {}),
+        } : {}),
+      };
+      Object.assign(policy, update);
+      // OpenSearch updates deep-merge objects: replacing the whole saved object
+      // makes removed overrides disappear, including an explicit empty config.
+      const { id, ...attributes } = policy;
+      await repo.create(XDR_POLICY_SAVED_OBJECT_TYPE, attributes, {
+        id, overwrite: !!stored, ...(stored?.version ? { version: stored.version } : {}),
+      });
 
       const body: UpsertPolicyResponse = {
         policy,

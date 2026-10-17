@@ -6,6 +6,7 @@ import {
   EuiButtonEmpty,
   EuiCallOut,
   EuiCodeBlock,
+  EuiFieldNumber,
   EuiFieldSearch,
   EuiFieldText,
   EuiFlexGroup,
@@ -26,9 +27,11 @@ import {
   EuiPanel,
   EuiSelect,
   EuiSpacer,
+  EuiSwitch,
   EuiTab,
   EuiTabs,
   EuiText,
+  EuiTextArea,
   EuiTitle,
   EuiToolTip,
 } from '@elastic/eui';
@@ -43,11 +46,13 @@ import {
   ListEnrollmentTokensResponse,
   RunActionResponse,
   UpsertPolicyResponse,
+  UNMANAGED_CONFIG_REVISION,
   XdrAction,
   XdrAgent,
   XdrEnrollmentToken,
   XdrPolicy,
 } from '../../common';
+import { createPolicyConfigDraft, intervalSettings, policyConfigUpdate } from './policy_config';
 
 interface XdrManagerAppDeps {
   basename: string;
@@ -140,6 +145,8 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
   const [editingPolicyId, setEditingPolicyId] = useState<string | null>(null);
   const [policyNameInput, setPolicyNameInput] = useState('');
   const [policyDescriptionInput, setPolicyDescriptionInput] = useState('');
+  const [policyConfigDraft, setPolicyConfigDraft] = useState(createPolicyConfigDraft);
+  const [policyConfigWasManaged, setPolicyConfigWasManaged] = useState(false);
   const [isSavingPolicy, setIsSavingPolicy] = useState(false);
   const [activeTab, setActiveTab] = useState<'agents' | 'policies' | 'tokens'>('agents');
 
@@ -442,6 +449,8 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     setEditingPolicyId(null);
     setPolicyNameInput('');
     setPolicyDescriptionInput('');
+    setPolicyConfigDraft(createPolicyConfigDraft());
+    setPolicyConfigWasManaged(false);
     setIsPolicyFlyoutOpen(true);
   }, []);
 
@@ -449,6 +458,8 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     setEditingPolicyId(policy.id);
     setPolicyNameInput(policy.name);
     setPolicyDescriptionInput(policy.description);
+    setPolicyConfigDraft(createPolicyConfigDraft(policy.config));
+    setPolicyConfigWasManaged(policy.config !== undefined);
     setIsPolicyFlyoutOpen(true);
   }, []);
 
@@ -462,9 +473,17 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       return;
     }
 
+    let config: ReturnType<typeof policyConfigUpdate>;
+    try {
+      config = policyConfigUpdate(policyConfigDraft, policyConfigWasManaged);
+    } catch (error) {
+      notifications.toasts.addWarning(error instanceof Error ? error.message : String(error));
+      return;
+    }
     const body = JSON.stringify({
       name: policyNameInput.trim(),
       description: policyDescriptionInput.trim(),
+      config,
     });
 
     setIsSavingPolicy(true);
@@ -504,6 +523,8 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     notifications.toasts,
     policyDescriptionInput,
     policyNameInput,
+    policyConfigDraft,
+    policyConfigWasManaged,
   ]);
 
   const deletePolicy = useCallback(
@@ -547,6 +568,25 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     {
       name: i18n.translate('xdrCoordinator.column.policy', { defaultMessage: 'Policy' }),
       render: (agent: XdrAgent) => policyNameById[agent.policyId] ?? agent.policyId,
+    },
+    {
+      name: i18n.translate('xdrCoordinator.column.configuration', { defaultMessage: 'Configuration' }),
+      render: (agent: XdrAgent) => {
+        const policy = policies.find((item) => item.id === agent.policyId);
+        const desiredRevision = policy?.configRevision ?? (agent.configRevision ? UNMANAGED_CONFIG_REVISION : undefined);
+        if (!desiredRevision && !agent.configError) return 'Local settings';
+        const applied = agent.configRevision === desiredRevision;
+        if (!policy?.configRevision && applied && !agent.configError) return 'Local settings';
+        return (
+          <EuiToolTip content={agent.configError || (applied
+            ? 'Policy settings are saved and active on the agent.'
+            : 'Waiting for the agent to apply policy settings. Older agents require an upgrade.')}>
+            <EuiBadge color={agent.configError ? 'danger' : applied ? 'success' : 'warning'}>
+              {agent.configError ? 'Error' : applied ? 'Applied' : 'Pending'}
+            </EuiBadge>
+          </EuiToolTip>
+        );
+      },
     },
     {
       field: 'status',
@@ -734,7 +774,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       render: (policy: XdrPolicy) => (
         <EuiFlexGroup gutterSize="s" responsive={false}>
           <EuiFlexItem grow={false}>
-            <EuiButtonEmpty size="xs" onClick={() => openEditPolicyFlyout(policy)} isDisabled={policy.id === 'default-endpoint'}>
+            <EuiButtonEmpty size="xs" onClick={() => openEditPolicyFlyout(policy)}>
               {i18n.translate('xdrCoordinator.policyEdit', { defaultMessage: 'Edit' })}
             </EuiButtonEmpty>
           </EuiFlexItem>
@@ -1058,7 +1098,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
                 <p>
                   {i18n.translate('xdrCoordinator.policySectionDescription', {
                     defaultMessage:
-                      'Group agents with policy labels. Protection content is included in agent releases.',
+                      'Manage shared settings for each agent group. Saved settings apply automatically to enrolled agents. Protection content is included in agent releases.',
                   })}
                 </p>
               </EuiText>
@@ -1399,6 +1439,57 @@ sudo apt install /tmp/xdr-agent-${arch}.deb`}
                       placeholder="Linux production endpoints."
                     />
                   </EuiFormRow>
+
+                  <EuiHorizontalRule />
+                  <EuiText size="s">
+                    <p>
+                      These settings apply to all agents in this policy. Leave an interval blank to
+                      keep local settings. Removing an existing override restores the agent default.
+                    </p>
+                  </EuiText>
+                  <EuiSpacer size="m" />
+                  <EuiFormRow>
+                    <EuiSwitch
+                      label="Manage internal networks"
+                      checked={policyConfigDraft.manageInternalNetworks}
+                      onChange={(event) => {
+                        const checked = event.target.checked;
+                        setPolicyConfigDraft((draft) => ({ ...draft, manageInternalNetworks: checked }));
+                      }}
+                    />
+                  </EuiFormRow>
+                  {policyConfigDraft.manageInternalNetworks && (
+                    <EuiFormRow
+                      label="Internal IPv4/IPv6 networks"
+                      helpText="One CIDR per line. An empty list leaves only loopback classified as internal."
+                    >
+                      <EuiTextArea
+                        value={policyConfigDraft.internalNetworks}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setPolicyConfigDraft((draft) => ({ ...draft, internalNetworks: value }));
+                        }}
+                        rows={4}
+                      />
+                    </EuiFormRow>
+                  )}
+                  {intervalSettings.map(({ key, label, placeholder }) => (
+                    <EuiFormRow key={key} label={label}>
+                      <EuiFieldNumber
+                        value={policyConfigDraft.intervals[key]}
+                        placeholder={`Local / default (${placeholder})`}
+                        min={1}
+                        max={86400}
+                        step={1}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setPolicyConfigDraft((draft) => ({
+                            ...draft, intervals: { ...draft.intervals, [key]: value },
+                          }));
+                        }}
+                      />
+                    </EuiFormRow>
+                  ))}
 
                 </EuiForm>
               </EuiFlyoutBody>

@@ -30,6 +30,7 @@ const {
   XDR_AGENT_SAVED_OBJECT_TYPE: AGENT,
   XDR_ENROLLMENT_TOKEN_SAVED_OBJECT_TYPE: TOKEN,
   XDR_POLICY_SAVED_OBJECT_TYPE: POLICY,
+  UNMANAGED_CONFIG_REVISION,
 } = require('../common/index.ts');
 
 // This list must agree with both registered routes and the Agent API document.
@@ -55,6 +56,17 @@ function fixture(ingestionReady) {
   const batches = [];
   const errors = [];
   let next = 0;
+  // SavedObjects.update uses OpenSearch's partial-document merge, including
+  // nested objects. In particular, updating an object to {} does not clear it.
+  const mergeDocument = (existing, update) => {
+    const merged = structuredClone(existing);
+    for (const [key, value] of Object.entries(update)) {
+      merged[key] = value && !Array.isArray(value) && typeof value === 'object' &&
+        merged[key] && !Array.isArray(merged[key]) && typeof merged[key] === 'object'
+        ? mergeDocument(merged[key], value) : structuredClone(value);
+    }
+    return merged;
+  };
   const repo = {
     async get(type, id) {
       const found = objects.get(`${type}:${id}`);
@@ -70,13 +82,16 @@ function fixture(ingestionReady) {
     },
     async create(type, attributes, options = {}) {
       const id = options.id || String(++next);
+      if (objects.has(`${type}:${id}`) && !options.overwrite) {
+        throw { output: { statusCode: 409 } };
+      }
       const item = { id, type, attributes: structuredClone(attributes) };
       objects.set(`${type}:${id}`, item);
       return item;
     },
     async update(type, id, attributes) {
       const old = await this.get(type, id);
-      const item = { ...old, attributes: { ...old.attributes, ...structuredClone(attributes) } };
+      const item = { ...old, attributes: mergeDocument(old.attributes, attributes) };
       objects.set(`${type}:${id}`, item);
       return item;
     },
@@ -288,6 +303,212 @@ test('heartbeat records degraded health and retains the assigned group; command 
   assert.equal((await f.call(expected[2], { query: { agent_id: 'agent-1', agent_version: '1.0.0' } })).status, 200);
   const done = await f.call(expected[2], { query: { agent_id: 'agent-1', agent_version: '2.0.0' } });
   assert.equal(done.body.pending_commands, undefined);
+});
+
+test('the default policy is editable, persistent, and listed once', async () => {
+  const f = fixture();
+  const config = { internal_networks: ['10.0.0.0/8', 'fc00::/7'], network_scan_interval_seconds: 2 };
+  const result = await f.call('PUT /api/xdr_manager/policies/{id}', {
+    params: { id: 'default-endpoint' },
+    body: { name: 'Managed endpoints', description: 'Fleet defaults', config },
+  });
+  assert.equal(result.status, 200);
+  assert.match(result.body.policy.configRevision, /^[a-f0-9]{32}$/);
+  const stored = await f.repo.get(POLICY, 'default-endpoint');
+  assert.deepEqual(stored.attributes.config, config);
+  assert.equal(stored.attributes.configRevision, result.body.policy.configRevision);
+  const listed = (await f.call('GET /api/xdr_manager/policies')).body.policies;
+  assert.equal(listed.filter((policy) => policy.id === 'default-endpoint').length, 1);
+  assert.equal(listed[0].name, 'Managed endpoints');
+  assert.deepEqual(listed[0].config, config);
+  assert.equal((await f.call('DELETE /api/xdr_manager/policies/{id}', {
+    params: { id: 'default-endpoint' },
+  })).status, 400);
+});
+
+test('policy revisions preserve settings on rename or omission and advance on change or removal', async () => {
+  const f = fixture();
+  const metadata = { name: 'Lab', description: 'Lab agents' };
+  const config = { internal_networks: ['192.168.0.0/16'], telemetry_ship_interval_seconds: 5 };
+  const created = (await f.call('POST /api/xdr_manager/policies', {
+    body: { ...metadata, config },
+  })).body.policy;
+  assert.ok(created.configRevision);
+  const params = { id: created.id };
+  const rename = (await f.call('PUT /api/xdr_manager/policies/{id}', {
+    params, body: { name: 'Renamed lab', description: 'Updated description' },
+  })).body.policy;
+  assert.equal(rename.configRevision, created.configRevision);
+  assert.deepEqual(rename.config, config);
+  const same = (await f.call('PUT /api/xdr_manager/policies/{id}', {
+    params, body: { ...metadata, config: {
+      telemetry_ship_interval_seconds: 5, internal_networks: ['192.168.0.0/16'],
+    } },
+  })).body.policy;
+  assert.equal(same.configRevision, created.configRevision, 'object key order is immaterial');
+  const changed = (await f.call('PUT /api/xdr_manager/policies/{id}', {
+    params, body: { ...metadata, config: { ...config, telemetry_ship_interval_seconds: 7 } },
+  })).body.policy;
+  assert.notEqual(changed.configRevision, created.configRevision);
+  const removed = (await f.call('PUT /api/xdr_manager/policies/{id}', {
+    params, body: { ...metadata, config: { telemetry_ship_interval_seconds: 7 } },
+  })).body.policy;
+  assert.notEqual(removed.configRevision, changed.configRevision);
+  assert.deepEqual((await f.repo.get(POLICY, created.id)).attributes.config,
+    { telemetry_ship_interval_seconds: 7 }, 'removed overrides must disappear from stored settings');
+  const cleared = (await f.call('PUT /api/xdr_manager/policies/{id}', {
+    params, body: { ...metadata, config: {} },
+  })).body.policy;
+  assert.deepEqual(cleared.config, {});
+  assert.notEqual(cleared.configRevision, removed.configRevision);
+  const unchanged = (await f.call('PUT /api/xdr_manager/policies/{id}', {
+    params, body: { ...metadata, config: {} },
+  })).body.policy;
+  assert.equal(unchanged.configRevision, cleared.configRevision);
+  assert.deepEqual((await f.repo.get(POLICY, created.id)).attributes.config, {});
+});
+
+test('heartbeat and commands deliver managed settings from the server-assigned policy', async () => {
+  const f = fixture();
+  await f.seed();
+  const config = { internal_networks: [], process_scan_interval_seconds: 3 };
+  const assigned = (await f.call('POST /api/xdr_manager/policies', {
+    body: { name: 'Servers', description: 'Server configuration', config },
+  })).body.policy;
+  await f.call('PUT /api/xdr_manager/policies/{id}', {
+    params: { id: 'default-endpoint' }, body: {
+      name: 'Default', description: 'Different settings', config: { network_scan_interval_seconds: 17 },
+    },
+  });
+  await f.repo.update(AGENT, 'agent-1', { policyId: assigned.id });
+  const desired = { schema_version: 1, revision: assigned.configRevision, settings: config };
+  const heartbeat = await f.call(expected[1], { body: identity });
+  assert.equal(heartbeat.status, 200);
+  assert.deepEqual(heartbeat.body.managed_config, desired);
+  assert.equal((await f.repo.get(AGENT, 'agent-1')).attributes.policyId, assigned.id);
+  const beforePoll = await f.repo.get(AGENT, 'agent-1');
+  const commands = await f.call(expected[2], {
+    query: { agent_id: 'agent-1', agent_version: '1.0.0' },
+  });
+  assert.deepEqual(commands.body.managed_config, desired);
+  assert.deepEqual(await f.repo.get(AGENT, 'agent-1'), beforePoll,
+    'configuration delivery does not write applied status or heartbeat time');
+});
+
+test('legacy policies without managed settings do not change agent responses', async () => {
+  const f = fixture();
+  await f.seed();
+  for (const policyId of ['default-endpoint', 'legacy-group', 'missing-group']) {
+    let assignedPolicyId = policyId;
+    if (policyId === 'legacy-group') {
+      const result = await f.call('POST /api/xdr_manager/policies', {
+        body: { name: 'Legacy group', description: 'Grouping only' },
+      });
+      assert.equal(result.body.policy.configRevision, undefined);
+      assignedPolicyId = result.body.policy.id;
+    }
+    await f.repo.update(AGENT, 'agent-1', { policyId: assignedPolicyId });
+    assert.equal((await f.call(expected[1], { body: identity })).body.managed_config, undefined);
+    assert.equal((await f.call(expected[2], {
+      query: { agent_id: 'agent-1', agent_version: '0.4.3' },
+    })).body.managed_config, undefined);
+  }
+});
+
+test('moving a managed agent to an unmanaged policy releases its previous overrides', async () => {
+  const f = fixture();
+  await f.seed();
+  const desired = { schema_version: 1, revision: UNMANAGED_CONFIG_REVISION, settings: {} };
+  // The first acknowledgement may arrive in this heartbeat, after reassignment.
+  const heartbeat = await f.call(expected[1], {
+    body: { ...identity, config_revision: 'previous-policy' },
+  });
+  assert.deepEqual(heartbeat.body.managed_config, desired);
+  const query = { agent_id: 'agent-1', agent_version: '1.0.0' };
+  assert.deepEqual((await f.call(expected[2], { query })).body.managed_config, desired);
+  await f.call(expected[1], { body: { ...identity, config_revision: desired.revision } });
+  assert.deepEqual((await f.call(expected[2], { query })).body.managed_config, desired);
+  // A missing assigned policy also cannot retain the former group's settings.
+  await f.repo.update(AGENT, 'agent-1', { policyId: 'removed-group' });
+  assert.deepEqual((await f.call(expected[2], { query })).body.managed_config, desired);
+});
+
+test('managed settings reject invalid CIDRs, unsupported keys, and unsafe interval values', async () => {
+  const f = fixture();
+  const metadata = { name: 'Invalid', description: 'Must not persist' };
+  const invalid = [
+    ...['10.0.0.0/33', 'fc00::/129', '10.0.0.0', '10.0.0.0/-1', '10.0.0.0/1.5',
+      '10.0.0.0/8/1', 'fe80::1%eth0/64', '999.1.1.1/24'].map((cidr) => ({ internal_networks: [cidr] })),
+    { internal_networks: Array(257).fill('10.0.0.0/8') },
+    { unknown_setting: true }, { enrollment_token: 'secret' },
+    { control_plane_url: 'https://other.example' }, { state_path: '/tmp/other.json' },
+    { opensearch: { url: 'https://other.example' } }, { detection_prevention: { mode: 'prevent' } },
+    ...['process_scan_interval_seconds', 'network_scan_interval_seconds', 'telemetry_ship_interval_seconds']
+      .flatMap((key) => [0, -1, 0.5, 86401].map((value) => ({ [key]: value }))),
+  ];
+  for (const config of invalid) {
+    await assert.rejects(f.call('POST /api/xdr_manager/policies', {
+      body: { ...metadata, config },
+    }), undefined, JSON.stringify(config));
+  }
+  assert.equal((await f.repo.find({ type: POLICY })).saved_objects.length, 0);
+  const accepted = await f.call('POST /api/xdr_manager/policies', {
+    body: { ...metadata, config: {
+      internal_networks: ['10.0.0.0/8', 'fc00::/7', '::/0'],
+      process_scan_interval_seconds: 1, network_scan_interval_seconds: 86400,
+      telemetry_ship_interval_seconds: 5,
+    } },
+  });
+  assert.equal(accepted.status, 200);
+});
+
+test('managed settings require the bound token and are hidden after revocation', async () => {
+  const f = fixture();
+  await f.seed();
+  await f.call('PUT /api/xdr_manager/policies/{id}', {
+    params: { id: 'default-endpoint' }, body: {
+      name: 'Default', description: 'Managed', config: { network_scan_interval_seconds: 2 },
+    },
+  });
+  const query = { agent_id: 'agent-1', agent_version: '1.0.0' };
+  assert.ok((await f.call(expected[2], { query })).body.managed_config);
+  for (const headers of [{}, { authorization: 'Bearer wrong' }]) {
+    for (const [route, input] of [[expected[1], { body: identity }], [expected[2], { query }]]) {
+      const result = await f.call(route, { ...input, headers });
+      assert.equal(result.status, 401);
+      assert.equal(result.body.managed_config, undefined);
+    }
+  }
+  await f.repo.delete(TOKEN, 'token-1');
+  for (const [route, input] of [[expected[1], { body: identity }], [expected[2], { query }]]) {
+    const result = await f.call(route, input);
+    assert.equal(result.status, 401);
+    assert.equal(result.body.managed_config, undefined);
+  }
+});
+
+test('heartbeats expose applied configuration and clear a previous error on successful acknowledgement', async () => {
+  const f = fixture();
+  await f.seed();
+  const policy = (await f.call('PUT /api/xdr_manager/policies/{id}', {
+    params: { id: 'default-endpoint' }, body: {
+      name: 'Default', description: 'Managed', config: { telemetry_ship_interval_seconds: 5 },
+    },
+  })).body.policy;
+  const failure = await f.call(expected[1], {
+    body: { ...identity, config_revision: 'previous-revision', config_error: 'Config file is read-only' },
+  });
+  assert.equal(failure.body.managed_config.revision, policy.configRevision);
+  let agent = (await f.call('GET /api/xdr_manager/agents')).body.agents[0];
+  assert.equal(agent.configRevision, 'previous-revision');
+  assert.equal(agent.configError, 'Config file is read-only');
+  assert.equal(agent.enrollmentToken, undefined);
+  await f.call(expected[1], { body: { ...identity, config_revision: policy.configRevision } });
+  agent = (await f.call('GET /api/xdr_manager/agents')).body.agents[0];
+  assert.equal(agent.configRevision, policy.configRevision);
+  assert.equal(agent.configError, '');
+  await f.call(expected[1], { body: identity });
+  assert.equal((await f.repo.get(AGENT, 'agent-1')).attributes.configRevision, policy.configRevision);
 });
 
 test('detection mode does not degrade an Agent for intentionally disabled execution blocking', async () => {
