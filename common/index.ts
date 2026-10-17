@@ -8,3 +8,4 @@ export const UNMANAGED_CONFIG_REVISION = 'local-defaults';
 
 export * from './types';
 export * from './health';
+export * from './version';

@@ -15,6 +15,14 @@ require.extensions['.ts'] = (module, filename) => module._compile(
 const {
   createPolicyConfigDraft, parsePolicyConfigDraft, policyConfigUpdate,
 } = require('../public/components/policy_config.ts');
+const { isNewerVersion } = require('../common/version.ts');
+
+test('upgrade availability compares numeric release versions and prevents downgrades', () => {
+  assert.equal(isNewerVersion('0.4.10', '0.4.9'), true);
+  for (const [candidate, installed] of [['0.4.9', '0.4.10'], ['0.4.9', '0.4.9'], [undefined, '0.4.9'], ['0.4.9', 'unknown']]) {
+    assert.equal(isNewerVersion(candidate, installed), false);
+  }
+});
 
 test('policy editor preserves unmanaged settings and explicit empty internal networks', () => {
   assert.deepEqual(parsePolicyConfigDraft(createPolicyConfigDraft()), {});

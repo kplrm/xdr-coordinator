@@ -41,6 +41,7 @@ import { CoreStart } from '../../../OpenSearch-Dashboards/src/core/public';
 import {
   EnrollmentTokenStatusResponse,
   agentHealthIssues,
+  isNewerVersion,
   GenerateEnrollmentTokenResponse,
   ListAgentsResponse,
   ListEnrollmentTokensResponse,
@@ -168,9 +169,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       const response = await http.get<ListAgentsResponse>('/api/xdr_manager/agents');
       setAgents(response.agents);
       setPolicies(response.policies);
-      if (response.latestVersion) {
-        setLatestVersion(response.latestVersion);
-      }
+      setLatestVersion(response.latestVersion);
       if (!policyId && response.policies.length > 0) {
         setPolicyId(response.policies[0].id);
       }
@@ -333,18 +332,21 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       return;
     }
     const confirmed: string[] = [];
+    const failed: string[] = [];
     for (const agentId of upgradeQueuedAgentIds) {
       const agent = agents.find((a) => a.id === agentId);
-      if (agent && agent.version === latestVersion) {
+      if (agent?.upgrade?.status === 'failed') failed.push(agentId);
+      if (agent && (agent.upgrade?.status === 'complete' || agent.version === latestVersion)) {
         confirmed.push(agentId);
       }
     }
-    if (confirmed.length === 0) {
+    if (confirmed.length === 0 && failed.length === 0) {
       return;
     }
     setUpgradeQueuedAgentIds((prev) => {
       const next = new Set(prev);
       confirmed.forEach((id) => next.delete(id));
+      failed.forEach((id) => next.delete(id));
       return next;
     });
     setUpgradeConfirmedAgentIds((prev) => {
@@ -604,7 +606,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       field: 'version',
       name: i18n.translate('xdrCoordinator.column.version', { defaultMessage: 'Version' }),
       render: (version: string) => {
-        const hasUpgrade = latestVersion && version !== latestVersion;
+        const hasUpgrade = isNewerVersion(latestVersion, version);
         return (
           <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
             <EuiFlexItem grow={false}>{version}</EuiFlexItem>
@@ -635,20 +637,21 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
       name: i18n.translate('xdrCoordinator.column.actions', { defaultMessage: 'Actions' }),
       width: '240px',
       render: (agent: XdrAgent) => {
-        // Disabled only when we positively know the agent is already on the latest version.
-        // Unknown latestVersion (GitHub unreachable) still allows queuing — the server
-        // resolves the target version at the next heartbeat.
-        const alreadyLatest = Boolean(latestVersion && agent.version === latestVersion);
+        // A verified newer release is required, including after a failed attempt.
+        const alreadyLatest = Boolean(latestVersion && !isNewerVersion(latestVersion, agent.version));
         const isUpgrading = upgradingAgentIds.has(agent.id);
-        // isQueued: command sent to server, waiting for agent to pick it up via heartbeat.
-        const isQueued = upgradeQueuedAgentIds.has(agent.id);
+        // Persisted server state also survives page reloads and browser sessions.
+        const isQueued = agent.upgrade ? ['queued', 'upgrading', 'retrying'].includes(agent.upgrade.status) : upgradeQueuedAgentIds.has(agent.id);
         // isConfirmed: agent reported the new version; green check shown briefly.
         const isConfirmed = upgradeConfirmedAgentIds.has(agent.id);
-        const upgradeError = upgradeErrorByAgentId[agent.id];
+        const upgradeError = upgradeErrorByAgentId[agent.id] || (agent.upgrade?.status === 'failed' ? agent.upgrade.error : undefined);
+        const retryTime = agent.upgrade?.nextAttemptAt && Date.parse(agent.upgrade.nextAttemptAt) > nowMs
+          ? ` ${agent.upgrade.attempts >= 3 ? 'Waiting for installation confirmation until' : 'Next attempt after'} ${new Date(agent.upgrade.nextAttemptAt).toLocaleString()}.`
+          : '';
 
         const upgradeTooltip = isQueued
           ? i18n.translate('xdrCoordinator.action.upgradeTooltipQueued', {
-              defaultMessage: 'Upgrade command queued — waiting for the agent to pick it up on its next heartbeat',
+              defaultMessage: 'Upgrade queued or running. Maximum three attempts with backoff; failures can be retried here.',
             })
           : alreadyLatest
           ? i18n.translate('xdrCoordinator.action.upgradeTooltipCurrent', {
@@ -660,7 +663,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
               values: { version: latestVersion },
             })
           : i18n.translate('xdrCoordinator.action.upgradeTooltipUnknown', {
-              defaultMessage: 'Queue upgrade — target version will be resolved at next heartbeat',
+              defaultMessage: 'Waiting for a verified published Agent release',
             });
 
         return (
@@ -668,17 +671,17 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
             <EuiFlexItem grow={false}>
               {/* span wrapper ensures EuiToolTip can attach its ref even when the
                   button is disabled (disabled elements don't fire mouse events). */}
-              <EuiToolTip content={upgradeTooltip}>
+              <EuiToolTip content={isQueued ? `${upgradeTooltip}${retryTime} ${agent.upgrade?.error || ''}` : upgradeTooltip}>
                 <span>
                   <EuiButtonEmpty
                     size="xs"
-                    isDisabled={alreadyLatest || isUpgrading || isQueued}
+                    isDisabled={!latestVersion || alreadyLatest || isUpgrading || isQueued}
                     isLoading={isUpgrading}
                     onClick={() => runAction(agent.id, 'upgrade')}
                   >
                     {isQueued
-                      ? i18n.translate('xdrCoordinator.action.upgradeQueued', { defaultMessage: 'Queued' })
-                      : i18n.translate('xdrCoordinator.action.upgrade', { defaultMessage: 'Upgrade' })}
+                      ? (agent.upgrade?.status === 'retrying' ? 'Retrying' : agent.upgrade?.status === 'upgrading' ? `Upgrading (${agent.upgrade.attempts}/3)` : 'Queued')
+                      : upgradeError ? 'Retry upgrade' : i18n.translate('xdrCoordinator.action.upgrade', { defaultMessage: 'Upgrade' })}
                   </EuiButtonEmpty>
                 </span>
               </EuiToolTip>
@@ -693,7 +696,7 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
                   position="top"
                   content={i18n.translate('xdrCoordinator.action.upgradeConfirmedTooltip', {
                     defaultMessage: 'Agent successfully upgraded to v{version}',
-                    values: { version: latestVersion },
+                    values: { version: agent.version },
                   })}
                 >
                   <span>
@@ -1353,7 +1356,7 @@ sudo apt install /tmp/xdr-agent-${arch}.deb`}
                             </React.Fragment>
                           ))
                         ) : (
-                          <EuiText size="s"><p>Waiting for the Agent VERSION from GitHub. Retrying automatically.</p></EuiText>
+                          <EuiText size="s"><p>Waiting for a published Agent release with both Debian packages.</p></EuiText>
                         )}
                         <EuiSpacer size="m" />
                         <EuiText size="s">

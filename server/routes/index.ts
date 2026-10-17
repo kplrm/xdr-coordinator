@@ -7,6 +7,7 @@ import { EVENT_STREAMS } from '../event_data_stream';
 import { IRouter, ISavedObjectsRepository, Logger } from '../../../OpenSearch-Dashboards/src/core/server';
 import {
   agentHealthIssues,
+  isNewerVersion,
   AgentStatus,
   ControlPlaneHeartbeatRequest,
   ControlPlaneHeartbeatResponse,
@@ -28,6 +29,7 @@ import {
   UpsertPolicyRequest,
   UpsertPolicyResponse,
   UNMANAGED_CONFIG_REVISION,
+  UpgradeState,
   XdrAgent,
   XdrPolicy,
   XDR_AGENT_SAVED_OBJECT_TYPE,
@@ -63,6 +65,8 @@ function toXdrAgent(so: { id: string; attributes: XdrAgentAttributes }): XdrAgen
     protection: so.attributes.protection,
     configRevision: so.attributes.configRevision,
     configError: so.attributes.configError,
+    pendingUpgradeVersion: so.attributes.pendingUpgradeVersion,
+    upgrade: so.attributes.upgrade,
   };
 }
 
@@ -76,35 +80,58 @@ type EnrollmentTokenAttributes = {
   consumedHostname?: string;
 };
 
-// The Agent's VERSION file is authoritative, independently of plugin versions.
+// Only completed, published stable releases can be installed.
 interface VersionCache {
-  version: string;
-  fetchedAt: number;
+  result: Promise<string>;
+  expiresAt: number;
 }
 let latestVersionCache: VersionCache | null = null;
-const VERSION_CACHE_TTL_MS = 60_000;
+const VERSION_CACHE_TTL_MS = 5 * 60_000;
 
 function fetchLatestVersionFromGitHub(): Promise<string> {
   return new Promise((resolve, reject) => {
     const options = {
-      hostname: 'raw.githubusercontent.com',
-      path: '/kplrm/xdr-agent/main/VERSION',
+      hostname: 'api.github.com',
+      path: '/repos/kplrm/xdr-agent/releases/latest',
       method: 'GET',
-      headers: { 'User-Agent': 'xdr-coordinator' },
+      headers: { 'User-Agent': 'xdr-coordinator', Accept: 'application/vnd.github+json' },
     };
     const req = https.request(options, (res) => {
       let data = '';
-      res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+      res.on('error', reject);
+      res.on('data', (chunk: Buffer) => {
+        data += chunk.toString();
+        if (data.length > 512 * 1024) req.destroy(new Error('GitHub release response is too large'));
+      });
       res.on('end', () => {
-        const version = data.trim();
-        if (res.statusCode !== 200 || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
-          reject(new Error('Could not read a valid xdr-agent VERSION from GitHub'));
-        } else {
+        try {
+          if (res.statusCode !== 200) {
+            const headers = res.headers ?? {};
+            const retryAfter = Number(headers['retry-after']);
+            const retryAt = Number.isFinite(retryAfter) ? Date.now() + retryAfter * 1000 : Date.parse(String(headers['retry-after']));
+            const resetAt = headers['x-ratelimit-remaining'] === '0' ? Number(headers['x-ratelimit-reset']) * 1000 : 0;
+            if (latestVersionCache) latestVersionCache.expiresAt = Math.max(latestVersionCache.expiresAt, retryAt || 0, resetAt || 0);
+            throw new Error(`GitHub release lookup failed: HTTP ${res.statusCode}`);
+          }
+          const release = JSON.parse(data);
+          const version = /^v([0-9]+\.[0-9]+\.[0-9]+)$/.exec(release.tag_name)?.[1];
+          if (!version || release.draft !== false || release.prerelease !== false || !Array.isArray(release.assets)) {
+            throw new Error('No published stable Agent release is available');
+          }
+          for (const arch of ['amd64', 'arm64']) {
+            const name = `xdr-agent_${version}_${arch}.deb`;
+            if (!release.assets.some((asset: any) => asset.name === name && asset.state === 'uploaded' && asset.size > 0 &&
+                asset.browser_download_url === `https://github.com/kplrm/xdr-agent/releases/download/v${version}/${name}`)) {
+              throw new Error(`Published Agent release is missing ${name}`);
+            }
+          }
           resolve(version);
+        } catch (error) {
+          reject(error);
         }
       });
     });
-    req.setTimeout(10000, () => req.destroy(new Error('GitHub VERSION lookup timed out')));
+    req.setTimeout(10000, () => req.destroy(new Error('GitHub release lookup timed out')));
     req.on('error', reject);
     req.end();
   });
@@ -112,12 +139,12 @@ function fetchLatestVersionFromGitHub(): Promise<string> {
 
 async function getCachedLatestVersion(): Promise<string> {
   const now = Date.now();
-  if (latestVersionCache && now - latestVersionCache.fetchedAt < VERSION_CACHE_TTL_MS) {
-    return latestVersionCache.version;
+  if (latestVersionCache && now < latestVersionCache.expiresAt) {
+    return latestVersionCache.result;
   }
-  const version = await fetchLatestVersionFromGitHub();
-  latestVersionCache = { version, fetchedAt: now };
-  return version;
+  // Share in-flight requests and cache failures as well as successes.
+  latestVersionCache = { result: fetchLatestVersionFromGitHub(), expiresAt: now + VERSION_CACHE_TTL_MS };
+  return latestVersionCache.result;
 }
 
 const STALE_AGENT_THRESHOLD_MS = 5 * 60 * 1000;
@@ -274,15 +301,40 @@ export function defineRoutes(
   agentRepoPromise: Promise<ISavedObjectsRepository>,
   ingestionReady: Promise<void> = Promise.resolve()
 ) {
-  const collectPendingCommands = async (agentId: string, agentVersion: string, agent: XdrAgentAttributes): Promise<string[]> => {
-    const target = agent.pendingUpgradeVersion;
-    if (!target) return [];
+  const collectPendingCommands = async (agentId: string, agentVersion: string, agent: XdrAgentAttributes): Promise<Pick<ControlPlaneHeartbeatResponse, 'pending_commands' | 'upgrade_id'>> => {
+    if (!agent.pendingUpgradeVersion || (agent.upgrade?.status === 'failed' && agent.pendingUpgradeVersion !== agentVersion)) return {};
+    if (agent.pendingUpgradeVersion !== agentVersion && Date.parse(agent.upgrade?.nextAttemptAt ?? '') > Date.now()) return {};
+    const repo = await agentRepoPromise;
+    // Only transition/delivery needs another read and an optimistic write.
+    const stored = await repo.get<XdrAgentAttributes>(XDR_AGENT_SAVED_OBJECT_TYPE, agentId);
+    const target = stored.attributes.pendingUpgradeVersion;
+    if (!target || target !== agent.pendingUpgradeVersion) return {};
+    let state: UpgradeState = stored.attributes.upgrade ?? {
+      id: randomBytes(16).toString('hex'), version: target, attempts: 0, status: 'queued', error: '', nextAttemptAt: '',
+    };
+    if (state.status === 'failed' && target !== agentVersion) return {};
+    if (target !== agentVersion && Date.parse(state.nextAttemptAt) > Date.now()) return {};
+    let command = false;
     if (target === agentVersion) {
-      const repo = await agentRepoPromise;
-      await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, agentId, { pendingUpgradeVersion: '' });
-      return [];
+      state = { ...state, status: 'complete', error: '', nextAttemptAt: '' };
+    } else if (state.attempts >= 3) {
+      state = { ...state, status: 'failed', error: state.error || 'Agent did not confirm installation after three attempts. Retry from Coordinator.' };
+    } else if (target !== await getCachedLatestVersion() || !isNewerVersion(target, agentVersion)) {
+      state = { ...state, status: 'failed', error: `Release v${target} is unavailable, superseded, or not newer. Retry when a newer published release is available.` };
+    } else {
+      state = { ...state, attempts: state.attempts + 1, status: 'upgrading', error: '',
+        nextAttemptAt: new Date(Date.now() + (state.attempts === 0 ? 60_000 : 5 * 60_000) + Math.floor(Math.random() * 15_000)).toISOString() };
+      command = true;
     }
-    return [`upgrade:${target}`];
+    try {
+      await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, agentId, {
+        upgrade: state, ...(state.status === 'complete' ? { pendingUpgradeVersion: '', version: agentVersion } : {}),
+      }, { version: stored.version });
+    } catch (error: any) {
+      if (error?.output?.statusCode === 409) return {}; // Another poll claimed it.
+      throw error;
+    }
+    return command ? { pending_commands: [`upgrade:${target}`], upgrade_id: `${state.id}:${state.attempts}` } : {};
   };
 
   router.post(
@@ -578,6 +630,10 @@ export function defineRoutes(
           agent_version: schema.string({ minLength: 1 }),
           config_revision: schema.maybe(schema.string({ minLength: 1, maxLength: 256 })),
           config_error: schema.maybe(schema.string({ maxLength: 1024 })),
+          upgrade_id: schema.maybe(schema.string({ minLength: 1, maxLength: 256 })),
+          upgrade_error: schema.maybe(schema.string({ maxLength: 1024 })),
+          upgrade_retryable: schema.maybe(schema.boolean()),
+          upgrade_retry_at: schema.maybe(schema.number({ min: 0 })),
           protection: schema.maybe(schema.object({
             rule_source: schema.string(), rule_version: schema.string(),
             rule_count: schema.number({ min: 0 }), mode: schema.string(),
@@ -622,7 +678,23 @@ export function defineRoutes(
         } : {}),
       });
 
-      let pendingCommands: string[] = [];
+      if (payload.upgrade_id && payload.upgrade_error) {
+        const stored = await repo.get<XdrAgentAttributes>(XDR_AGENT_SAVED_OBJECT_TYPE, payload.agent_id);
+        const state = stored.attributes.upgrade;
+        if (state && payload.upgrade_id === `${state.id}:${state.attempts}` && state.status !== 'complete' &&
+            (state.error !== payload.upgrade_error || state.status === 'upgrading')) {
+          try {
+            await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, payload.agent_id, { upgrade: {
+              ...state, error: payload.upgrade_error,
+              status: payload.upgrade_retryable === false || state.attempts >= 3 ? 'failed' : 'retrying',
+              nextAttemptAt: new Date(Math.max(Date.parse(state.nextAttemptAt) || 0, Math.min((payload.upgrade_retry_at || 0) * 1000, Date.now() + 86400_000), Date.now() + (payload.upgrade_retryable === false || state.attempts > 1 ? 5 * 60_000 : 60_000))).toISOString(),
+            } }, { version: stored.version });
+          } catch (error: any) {
+            if (error?.output?.statusCode !== 409) throw error;
+          }
+        }
+      }
+      let pendingCommands: Pick<ControlPlaneHeartbeatResponse, 'pending_commands' | 'upgrade_id'> = {};
       let managedConfig: ManagedConfigPolicy | undefined;
       try {
         pendingCommands = await collectPendingCommands(
@@ -634,7 +706,7 @@ export function defineRoutes(
         // Keep heartbeat healthy even if command lookup fails.
         // The agent polls commands frequently and will pick them up on recovery.
         logger.warn(`heartbeat command lookup failed for agent ${payload.agent_id}: ${String(err?.message ?? err)}`);
-        pendingCommands = [];
+        pendingCommands = {};
       }
       try {
         managedConfig = await managedConfigForAgent(repo, {
@@ -647,7 +719,7 @@ export function defineRoutes(
 
       const body: ControlPlaneHeartbeatResponse = {
         message: `heartbeat accepted for ${payload.hostname}`,
-        pending_commands: pendingCommands.length > 0 ? pendingCommands : undefined,
+        ...pendingCommands,
         managed_config: managedConfig,
       };
 
@@ -656,9 +728,8 @@ export function defineRoutes(
   );
 
   // ── Fast command poll ────────────────────────────────────────────────────
-  // Lightweight read-only endpoint polled by the agent every few seconds.
-  // Returns any pending commands without updating lastSeen or the saved object,
-  // so it is safe to call frequently without inflating heartbeat metrics.
+  // Routine polls are read-only; delivery atomically claims a bounded attempt.
+  // No command poll updates lastSeen or inflates heartbeat metrics.
   router.get(
     {
       path: '/api/v1/agents/commands',
@@ -699,7 +770,7 @@ export function defineRoutes(
 
       const body: ControlPlaneHeartbeatResponse = {
         message: 'commands polled',
-        pending_commands: pendingCommands.length > 0 ? pendingCommands : undefined,
+        ...pendingCommands,
         managed_config: await managedConfigForAgent(repo, auth.agent.attributes),
       };
 
@@ -721,7 +792,7 @@ export function defineRoutes(
         sortOrder: 'desc',
       });
 
-      // Read the Agent VERSION independently of the installed plugin version.
+      // Verify published Agent packages independently of the plugin version.
       let latestVersion: string | undefined;
       try {
         latestVersion = await getCachedLatestVersion();
@@ -926,13 +997,23 @@ export function defineRoutes(
       }
 
       const targetVersion = await getCachedLatestVersion();
-      await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, request.params.id, { pendingUpgradeVersion: targetVersion });
+      if (!isNewerVersion(targetVersion, existing.attributes.version)) {
+        return response.badRequest({ body: 'Agent is already on this release or a newer version' });
+      }
+      if (existing.attributes.upgrade?.version === targetVersion && ['queued', 'upgrading', 'retrying'].includes(existing.attributes.upgrade.status)) {
+        return response.ok({ body: { agent: toXdrAgent(existing), message: 'Upgrade is already queued' } });
+      }
+      const upgrade: UpgradeState = {
+        id: randomBytes(16).toString('hex'), version: targetVersion, attempts: 0, status: 'queued', error: '',
+        nextAttemptAt: Date.parse(existing.attributes.upgrade?.nextAttemptAt ?? '') > Date.now() ? existing.attributes.upgrade?.nextAttemptAt ?? '' : '',
+      };
+      await repo.update(XDR_AGENT_SAVED_OBJECT_TYPE, request.params.id, { pendingUpgradeVersion: targetVersion, upgrade });
 
-      const agent: XdrAgent = toXdrAgent(existing);
+      const agent: XdrAgent = toXdrAgent({ ...existing, attributes: { ...existing.attributes, pendingUpgradeVersion: targetVersion, upgrade } });
 
       const body: RunActionResponse = {
         agent,
-        message: `Upgrade queued for ${agent.name}. The agent will upgrade on its next heartbeat.`,
+        message: `Upgrade queued for ${agent.name}. At most three attempts; retry a failed upgrade from Coordinator.`,
       };
 
       return response.ok({ body });
@@ -1144,7 +1225,7 @@ export function defineRoutes(
   );
 
   // ── GET /api/xdr_manager/version/latest ────────────────────────────────
-  // Returns xdr-agent's authoritative VERSION (cached for one minute).
+  // Returns a verified published Agent release (successes/failures cached).
 
   router.get(
     {

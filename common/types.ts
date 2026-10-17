@@ -42,9 +42,19 @@ export interface XdrAgent {
   version: string;
   enrollmentToken?: string;
   pendingUpgradeVersion?: string;
+  upgrade?: UpgradeState;
   protection?: ProtectionInventory;
   configRevision?: string;
   configError?: string;
+}
+
+export interface UpgradeState {
+  id: string;
+  version: string;
+  attempts: number;
+  status: 'queued' | 'upgrading' | 'retrying' | 'failed' | 'complete';
+  error: string;
+  nextAttemptAt: string;
 }
 
 export interface ListAgentsResponse {
@@ -117,11 +127,16 @@ export interface ControlPlaneHeartbeatRequest {
   protection?: ProtectionInventory;
   config_revision?: string;
   config_error?: string;
+  upgrade_id?: string;
+  upgrade_error?: string;
+  upgrade_retryable?: boolean;
+  upgrade_retry_at?: number;
 }
 
 export interface ControlPlaneHeartbeatResponse {
   message: string;
   pending_commands?: string[];
+  upgrade_id?: string;
   managed_config?: ManagedConfigPolicy;
 }
 

@@ -56,6 +56,7 @@ function fixture(ingestionReady) {
   const batches = [];
   const errors = [];
   let next = 0;
+  let revision = 0;
   // SavedObjects.update uses OpenSearch's partial-document merge, including
   // nested objects. In particular, updating an object to {} does not clear it.
   const mergeDocument = (existing, update) => {
@@ -85,13 +86,14 @@ function fixture(ingestionReady) {
       if (objects.has(`${type}:${id}`) && !options.overwrite) {
         throw { output: { statusCode: 409 } };
       }
-      const item = { id, type, attributes: structuredClone(attributes) };
+      const item = { id, type, version: String(++revision), attributes: structuredClone(attributes) };
       objects.set(`${type}:${id}`, item);
       return item;
     },
-    async update(type, id, attributes) {
+    async update(type, id, attributes, options = {}) {
       const old = await this.get(type, id);
-      const item = { ...old, attributes: mergeDocument(old.attributes, attributes) };
+      if (options.version !== undefined && options.version !== objects.get(`${type}:${id}`).version) throw { output: { statusCode: 409 } };
+      const item = { ...old, version: String(++revision), attributes: mergeDocument(old.attributes, attributes) };
       objects.set(`${type}:${id}`, item);
       return item;
     },
@@ -170,7 +172,7 @@ const event = (module, kind = 'event') => ({
   payload: {},
 });
 
-test('Agent version comes from VERSION, rejects invalid responses and is cached', async (t) => {
+test('only a published stable release with both uploaded packages is offered; requests and failures are cached', async (t) => {
   let reply;
   const requests = [];
   t.mock.method(https, 'request', (options, onResponse) => {
@@ -180,6 +182,7 @@ test('Agent version comes from VERSION, rejects invalid responses and is cached'
     request.end = () => queueMicrotask(() => {
       const response = new EventEmitter();
       response.statusCode = reply.status;
+      response.headers = reply.headers ?? {};
       onResponse(response);
       response.emit('data', Buffer.from(reply.body));
       response.emit('end');
@@ -187,22 +190,41 @@ test('Agent version comes from VERSION, rejects invalid responses and is cached'
     return request;
   });
   const f = fixture();
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const release = { tag_name: 'v2.0.0', draft: false, prerelease: false, assets: ['amd64', 'arm64'].map((arch) => ({
+    name: `xdr-agent_2.0.0_${arch}.deb`, state: 'uploaded', size: 123,
+    browser_download_url: `https://github.com/kplrm/xdr-agent/releases/download/v2.0.0/xdr-agent_2.0.0_${arch}.deb`,
+  })) };
   for (reply of [
     { status: 404, body: '1.2.3' },
-    { status: 200, body: '{"tag_name":"v1.2.3"}' },
+    { status: 200, body: JSON.stringify({ ...release, assets: release.assets.slice(0, 1) }) },
+    { status: 200, body: JSON.stringify({ ...release, draft: true }) },
+    { status: 200, body: JSON.stringify({ ...release, prerelease: true }) },
     { status: 200, body: '1.2.3;id' },
   ]) {
     assert.equal((await f.call('GET /api/xdr_manager/version/latest')).status, 502);
+    const count = requests.length;
+    assert.equal((await f.call('GET /api/xdr_manager/version/latest')).status, 502);
+    assert.equal(requests.length, count, 'failed lookups must not repeat on every fleet poll');
+    now += 5 * 60_000 + 1;
   }
-  reply = { status: 200, body: '1.2.3\n' };
-  assert.deepEqual(await f.call('GET /api/xdr_manager/version/latest'), {
-    status: 200, body: { version: '1.2.3' },
-  });
-  assert.equal((await f.call('GET /api/xdr_manager/agents')).body.latestVersion, '1.2.3');
-  assert.equal(requests.length, 4, 'valid VERSION should be cached across routes');
+  reply = { status: 403, body: '{}', headers: { 'retry-after': '3600' } };
+  assert.equal((await f.call('GET /api/xdr_manager/version/latest')).status, 502);
+  const limitedCount = requests.length;
+  now += 5 * 60_000 + 1;
+  assert.equal((await f.call('GET /api/xdr_manager/version/latest')).status, 502);
+  assert.equal(requests.length, limitedCount, 'GitHub cooldown must extend the normal cache window');
+  now += 3600_000;
+  reply = { status: 200, body: JSON.stringify(release) };
+  const count = requests.length;
+  const answers = await Promise.all([f.call('GET /api/xdr_manager/version/latest'), f.call('GET /api/xdr_manager/version/latest')]);
+  assert.deepEqual(answers[0], { status: 200, body: { version: '2.0.0' } });
+  assert.equal((await f.call('GET /api/xdr_manager/agents')).body.latestVersion, '2.0.0');
+  assert.equal(requests.length, count + 1, 'concurrent and subsequent callers share one request');
   for (const request of requests) {
-    assert.equal(request.hostname, 'raw.githubusercontent.com');
-    assert.equal(request.path, '/kplrm/xdr-agent/main/VERSION');
+    assert.equal(request.hostname, 'api.github.com');
+    assert.equal(request.path, '/repos/kplrm/xdr-agent/releases/latest');
   }
 });
 
@@ -303,6 +325,67 @@ test('heartbeat records degraded health and retains the assigned group; command 
   assert.equal((await f.call(expected[2], { query: { agent_id: 'agent-1', agent_version: '1.0.0' } })).status, 200);
   const done = await f.call(expected[2], { query: { agent_id: 'agent-1', agent_version: '2.0.0' } });
   assert.equal(done.body.pending_commands, undefined);
+});
+
+test('upgrade dispatch is spaced, limited to three attempts, and survives repeated or concurrent polls', async () => {
+  const f = fixture();
+  await f.seed();
+  const poll = () => f.call(expected[2], { query: { agent_id: 'agent-1', agent_version: '1.0.0' } });
+  const first = await poll();
+  assert.deepEqual(first.body.pending_commands, ['upgrade:2.0.0']);
+  for (let i = 0; i < 20; i++) assert.equal((await poll()).body.pending_commands, undefined);
+  const due = async () => {
+    const stored = await f.repo.get(AGENT, 'agent-1');
+    await f.repo.update(AGENT, 'agent-1', { upgrade: { ...stored.attributes.upgrade, nextAttemptAt: '2000-01-01T00:00:00Z' } });
+  };
+  await due();
+  const concurrent = await Promise.all([poll(), poll()]);
+  assert.equal(concurrent.filter((answer) => answer.body.pending_commands).length, 1);
+  assert.equal((await f.repo.get(AGENT, 'agent-1')).attributes.upgrade.attempts, 2);
+  await due();
+  assert.ok((await poll()).body.pending_commands);
+  await due();
+  assert.equal((await poll()).body.pending_commands, undefined);
+  const failed = (await f.repo.get(AGENT, 'agent-1')).attributes.upgrade;
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.attempts, 3);
+  for (let i = 0; i < 20; i++) assert.equal((await poll()).body.pending_commands, undefined);
+  const retried = await f.call('POST /api/xdr_manager/agents/{id}/action', { params: { id: 'agent-1' }, body: { action: 'upgrade' } });
+  assert.equal(retried.body.agent.upgrade.attempts, 0);
+  assert.notEqual(retried.body.agent.upgrade.id, failed.id);
+  assert.equal(retried.body.agent.upgrade.status, 'queued');
+});
+
+test('reported failures stop permanent downloads and preserve rate-limit cooldown across an explicit retry', async () => {
+  const f = fixture();
+  await f.seed();
+  const query = { agent_id: 'agent-1', agent_version: '1.0.0' };
+  const dispatched = await f.call(expected[2], { query });
+  const retryAt = Math.floor(Date.now() / 1000) + 3600;
+  await f.call(expected[1], { body: {
+    ...identity, upgrade_id: dispatched.body.upgrade_id, upgrade_error: 'download: HTTP 429', upgrade_retryable: false, upgrade_retry_at: retryAt,
+  } });
+  const failed = (await f.repo.get(AGENT, 'agent-1')).attributes.upgrade;
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.attempts, 1);
+  assert.ok(Date.parse(failed.nextAttemptAt) >= retryAt * 1000);
+  assert.equal((await f.call(expected[2], { query })).body.pending_commands, undefined);
+  const next = await f.call('POST /api/xdr_manager/agents/{id}/action', { params: { id: 'agent-1' }, body: { action: 'upgrade' } });
+  assert.notEqual(next.body.agent.upgrade.id, failed.id);
+  assert.equal(next.body.agent.upgrade.nextAttemptAt, failed.nextAttemptAt);
+  assert.equal((await f.call(expected[2], { query })).body.pending_commands, undefined);
+  await f.call(expected[1], { body: { ...identity, upgrade_id: dispatched.body.upgrade_id, upgrade_error: 'stale failure' } });
+  assert.equal((await f.repo.get(AGENT, 'agent-1')).attributes.upgrade.status, 'queued');
+});
+
+test('unpublished legacy queues are stopped and upgrades never downgrade newer installed agents', async () => {
+  const f = fixture();
+  await f.seed();
+  await f.repo.update(AGENT, 'agent-1', { pendingUpgradeVersion: '9.0.0' });
+  assert.equal((await f.call(expected[2], { query: { agent_id: 'agent-1', agent_version: '1.0.0' } })).body.pending_commands, undefined);
+  assert.equal((await f.repo.get(AGENT, 'agent-1')).attributes.upgrade.status, 'failed');
+  await f.repo.update(AGENT, 'agent-1', { version: '3.0.0' });
+  assert.equal((await f.call('POST /api/xdr_manager/agents/{id}/action', { params: { id: 'agent-1' }, body: { action: 'upgrade' } })).status, 400);
 });
 
 test('the default policy is editable, persistent, and listed once', async () => {

@@ -57,6 +57,7 @@ export class XdrManagerPlugin implements Plugin<XdrManagerPluginSetup, XdrManage
           version: { type: 'keyword' },
           enrollmentToken: { type: 'keyword' },
           pendingUpgradeVersion: { type: 'keyword' },
+          upgrade: { type: 'object', enabled: false },
           protection: { type: 'object', enabled: false },
           configRevision: { type: 'keyword' },
           configError: { type: 'text', index: false },
