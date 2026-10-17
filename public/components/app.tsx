@@ -1461,7 +1461,7 @@ sudo apt install /tmp/xdr-agent-${arch}.deb`}
                   {policyConfigDraft.manageInternalNetworks && (
                     <EuiFormRow
                       label="Internal IPv4/IPv6 networks"
-                      helpText="One CIDR per line. An empty list leaves only loopback classified as internal."
+                      helpText="One CIDR per line. Host interface addresses and loopback are always internal."
                     >
                       <EuiTextArea
                         value={policyConfigDraft.internalNetworks}
