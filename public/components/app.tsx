@@ -1324,6 +1324,22 @@ sudo apt install /tmp/xdr-agent-${arch}.deb`}
                           </strong>
                         </EuiText>
                         <EuiSpacer size="xs" />
+                        <EuiText size="s">
+                          <p>
+                            Set <code>XDR_OPENSEARCH_PASSWORD</code> to your OpenSearch ingestion
+                            account's password. This is the default <code>opensearch.password_env</code>;
+                            the service loads the file automatically.
+                          </p>
+                        </EuiText>
+                        <EuiCodeBlock language="bash" isCopyable>
+                          sudo nano /etc/xdr-agent/opensearch.env
+                        </EuiCodeBlock>
+                        <EuiText size="s">
+                          <p>
+                            For direct delivery, set <code>opensearch.url</code> and <code>opensearch.ca_file</code>
+                            {' '}in <code>/etc/xdr-agent/config.json</code>, then enroll:
+                          </p>
+                        </EuiText>
                         <EuiCodeBlock language="bash" isCopyable>
                           {`sudo xdr-agent enroll ${enrollmentToken} \\
   --control-plane-url=${controlPlaneUrl || suggestedControlPlaneUrl} \\
