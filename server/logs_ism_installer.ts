@@ -17,13 +17,6 @@ function buildIndexTemplate() {
         dynamic: true,
         dynamic_templates: [
           {
-            payload_strings_as_keyword: {
-              path_match: 'payload.*',
-              match_mapping_type: 'string',
-              mapping: { type: 'keyword', ignore_above: 1024 },
-            },
-          },
-          {
             strings_as_keyword: {
               match_mapping_type: 'string',
               mapping: { type: 'keyword', ignore_above: 1024 },
@@ -44,10 +37,6 @@ function buildIndexTemplate() {
           message: { type: 'text' },
           tags: { type: 'keyword' },
           indexed_at: { type: 'date' },
-          payload: {
-            type: 'object',
-            dynamic: true,
-          },
         },
       },
     },

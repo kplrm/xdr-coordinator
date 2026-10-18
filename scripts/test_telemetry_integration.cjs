@@ -40,19 +40,19 @@ test('oversized process keywords reproduce bulk failure and survive mapping repa
   }, { info() {}, debug() {}, warn: (message) => assert.fail(message) });
 
   const original = structuredClone(template.template.mappings);
-  const processFields = original.properties.payload.properties.process.properties;
+  const processFields = original.properties.process.properties;
   for (const fields of [processFields, processFields.parent.properties]) {
     for (const name of ['command_line', 'args']) delete fields[name].ignore_above;
   }
   const docs = [];
   // Cover ASCII and four-byte Unicode, each process field, and array elements.
   for (const value of ['a'.repeat(39389), '😀'.repeat(9000)]) {
-    docs.push({ payload: { process: { command_line: value } } });
-    docs.push({ payload: { process: { args: ['short-argument', value] } } });
-    docs.push({ payload: { process: { parent: { command_line: value } } } });
-    docs.push({ payload: { process: { parent: { args: ['short-argument', value] } } } });
+    docs.push({ process: { command_line: value } });
+    docs.push({ process: { args: ['short-argument', value] } });
+    docs.push({ process: { parent: { command_line: value } } });
+    docs.push({ process: { parent: { args: ['short-argument', value] } } });
   }
-  docs.push({ payload: { process: { command_line: 'ordinary-command' } } });
+  docs.push({ process: { command_line: 'ordinary-command' } });
   const index = `xdr-keyword-ingest-test-${randomUUID()}`;
   const created = [];
   const create = async (name, mappings) => {
@@ -82,11 +82,11 @@ test('oversized process keywords reproduce bulk failure and survive mapping repa
       assert.deepEqual(stored._source, docs[i], 'full values must remain in _source');
     }
     const ordinary = (await client.search({ index, body: {
-      query: { term: { 'payload.process.command_line': 'ordinary-command' } },
+      query: { term: { 'process.command_line': 'ordinary-command' } },
     } })).body;
     assert.equal(ordinary.hits.total.value, 1);
     const shortArgs = (await client.search({ index, body: {
-      query: { term: { 'payload.process.args': 'short-argument' } },
+      query: { term: { 'process.args': 'short-argument' } },
     } })).body;
     assert.equal(shortArgs.hits.total.value, 2);
 

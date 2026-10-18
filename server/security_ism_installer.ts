@@ -19,13 +19,6 @@ function buildIndexTemplate() {
         dynamic: true,
         dynamic_templates: [
           {
-            payload_strings_as_keyword: {
-              path_match: 'payload.*',
-              match_mapping_type: 'string',
-              mapping: { type: 'keyword', ignore_above: 1024 },
-            },
-          },
-          {
             strings_as_keyword: {
               match_mapping_type: 'string',
               mapping: { type: 'keyword', ignore_above: 1024 },
@@ -42,70 +35,58 @@ function buildIndexTemplate() {
           'event.module': { type: 'keyword' },
           'agent.id': { type: 'keyword' },
           'host.hostname': { type: 'keyword' },
-          'rule.id': { type: 'keyword' },
-          'rule.name': { type: 'keyword' },
           'threat.tactic.name': { type: 'keyword' },
           'threat.technique.id': { type: 'keyword' },
           'threat.technique.subtechnique.id': { type: 'keyword' },
           tags: { type: 'keyword' },
           indexed_at: { type: 'date' },
-          payload: {
-            type: 'object',
-            dynamic: true,
+          // ECS rule fields (detection.malware / detection.behavioral alerts)
+          rule: {
             properties: {
-              // ECS rule fields (detection.malware / detection.behavioral alerts)
-              rule: {
-                properties: {
-                  id: { type: 'keyword' },
-                  name: { type: 'keyword' },
-                  description: { type: 'keyword' },
-                  tags: { type: 'keyword' },
-                },
-              },
-              // ECS file fields (hash match / YARA / static alerts)
-              file: {
-                properties: {
-                  path: { type: 'keyword' },
-                  hash: {
-                    properties: {
-                      sha256: { type: 'keyword' },
-                    },
-                  },
-                },
-              },
-              // Detection metadata
-              method: { type: 'keyword' },    // "hash" | "yara-x" | "static"
-              // ECS event.action — the response taken: "alert" | "block"
-              event: {
-                properties: {
-                  action: { type: 'keyword' },
-                },
-              },
-              // Source event context
-              source: {
-                properties: {
-                  module: { type: 'keyword' },
-                  type: { type: 'keyword' },
-                },
-              },
-              // Threat intel indicator fields
-              indicator: {
-                properties: {
-                  type: { type: 'keyword' },
-                  value: { type: 'keyword' },
-                  source: { type: 'keyword' },
-                },
-              },
-              // MITRE ATT&CK (behavioral rules)
-              mitre: {
-                properties: {
-                  tactic: { type: 'keyword' },
-                  technique: { type: 'keyword' },
-                },
-              },
-              trigger_event_type: { type: 'keyword' },
+              id: { type: 'keyword' },
+              name: { type: 'keyword' },
+              description: { type: 'keyword' },
+              tags: { type: 'keyword' },
             },
           },
+          // ECS file fields (hash match / YARA / static alerts)
+          file: {
+            properties: {
+              path: { type: 'keyword' },
+              hash: {
+                properties: {
+                  sha256: { type: 'keyword' },
+                },
+              },
+            },
+          },
+          // Detection metadata
+          method: { type: 'keyword' },    // "hash" | "yara-x" | "static"
+          // ECS event.action — the response taken: "alert" | "block"
+          'event.action': { type: 'keyword' },
+          // Source event context
+          source: {
+            properties: {
+              module: { type: 'keyword' },
+              type: { type: 'keyword' },
+            },
+          },
+          // Threat intel indicator fields
+          indicator: {
+            properties: {
+              type: { type: 'keyword' },
+              value: { type: 'keyword' },
+              source: { type: 'keyword' },
+            },
+          },
+          // MITRE ATT&CK (behavioral rules)
+          mitre: {
+            properties: {
+              tactic: { type: 'keyword' },
+              technique: { type: 'keyword' },
+            },
+          },
+          trigger_event_type: { type: 'keyword' },
         },
       },
     },

@@ -70,5 +70,12 @@ export async function installEventDataStream(client: any, logger: Logger, topic:
     const type = error.body?.error?.type ?? error.meta?.body?.error?.type;
     if (type !== 'resource_already_exists_exception') throw error;
   }
-  logger.info(`xdr_manager: ensured data stream [${stream}] and ISM policy [${policyId}]`);
+  await client.indices.putMapping({
+    index: stream,
+    expand_wildcards: 'open,hidden',
+    allow_no_indices: true,
+    ignore_unavailable: true,
+    body: body.template.mappings,
+  });
+  logger.info(`xdr_manager: ensured data stream [${stream}], mappings and ISM policy [${policyId}]`);
 }

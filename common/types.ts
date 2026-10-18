@@ -195,11 +195,11 @@ export interface TelemetryEvent {
   'event.type': string;
   'event.category': string;
   'event.kind': string;
-  'event.severity': number;
+  'event.severity'?: number;
   'event.module': string;
   'agent.id': string;
   'host.hostname': string;
-  payload?: Record<string, unknown>;
+  [field: string]: unknown;
   'threat.tactic.name'?: string;
   'threat.technique.id'?: string;
   'threat.technique.subtechnique.id'?: string;

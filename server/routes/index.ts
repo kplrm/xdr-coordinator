@@ -1036,15 +1036,23 @@ export function defineRoutes(
     'event.type': schema.string(),
     'event.category': schema.string(),
     'event.kind': schema.string(),
-    'event.severity': schema.number(),
+    'event.severity': schema.maybe(schema.number()),
     'event.module': schema.string(),
     'agent.id': schema.string(),
     'host.hostname': schema.string(),
-    payload: schema.maybe(schema.recordOf(schema.string(), schema.any())),
     'threat.tactic.name': schema.maybe(schema.string()),
     'threat.technique.id': schema.maybe(schema.string()),
     'threat.technique.subtechnique.id': schema.maybe(schema.string()),
     tags: schema.maybe(schema.arrayOf(schema.string())),
+  }, {
+    unknowns: 'allow',
+    validate: (event) => {
+      if ('payload' in event) return 'Event detail fields must be at the document root';
+      if ('agent' in event) return 'Agent identity must use the agent.id envelope field';
+      const unscored = ['telemetry.process', 'telemetry.network', 'telemetry.dns'].includes(event['event.module']);
+      if (unscored && event['event.severity'] !== undefined) return 'This telemetry module must omit event.severity';
+      if (!unscored && event['event.severity'] === undefined) return 'event.severity is required for this module';
+    },
   });
 
   const indexBatch = async (

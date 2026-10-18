@@ -166,10 +166,9 @@ const event = (module, kind = 'event') => ({
   'event.module': module,
   'event.kind': kind,
   'event.category': 'process',
-  'event.severity': 0,
+  ...(['telemetry.process', 'telemetry.network', 'telemetry.dns'].includes(module) ? {} : { 'event.severity': 0 }),
   'agent.id': 'spoofed',
   'host.hostname': 'host',
-  payload: {},
 });
 
 test('only a published stable release with both uploaded packages is offered; requests and failures are cached', async (t) => {
@@ -231,13 +230,13 @@ test('only a published stable release with both uploaded packages is offered; re
 test('bulk diagnostics identify status, field and causes without logging event values', () => {
   const error = { index: { status: 400, error: {
     type: 'mapper_parsing_exception',
-    reason: "failed to parse field [payload.process.command_line] of type [keyword]. Preview of field's value: 'secret-input'",
+    reason: "failed to parse field [process.command_line] of type [keyword]. Preview of field's value: 'secret-input'",
     caused_by: { type: 'illegal_argument_exception', reason: 'sensitive payload' },
   } } };
   const summary = summarizeBulkFailures([error, error, error, error]);
   assert.equal(JSON.parse(summary).length, 3);
   assert.deepEqual(JSON.parse(summary)[0], {
-    status: 400, field: 'payload.process.command_line',
+    status: 400, field: 'process.command_line',
     causes: ['mapper_parsing_exception', 'illegal_argument_exception'],
   });
   assert.doesNotMatch(summary, /secret-input|sensitive payload/);
@@ -246,7 +245,7 @@ test('bulk diagnostics identify status, field and causes without logging event v
   } } }]))[0].causes[0], 'security_exception');
 });
 
-test('startup bounds process keywords in the template and telemetry stream', async () => {
+test('startup maps host endpoints and bounds process keywords in the telemetry stream', async () => {
   let template;
   let update;
   const warnings = [];
@@ -265,8 +264,21 @@ test('startup bounds process keywords in the template and telemetry stream', asy
   assert.equal(update.expand_wildcards, 'open,hidden');
   assert.equal(update.allow_no_indices, true);
   assert.equal(update.ignore_unavailable, true);
-  const newProcess = template.body.template.mappings.properties.payload.properties.process.properties;
-  const existingProcess = update.body.properties.payload.properties.process.properties;
+  const newProcess = template.body.template.mappings.properties.process.properties;
+  const existingProcess = update.body.properties.process.properties;
+  for (const fields of [template.body.template.mappings.properties, update.body.properties]) {
+    for (const endpoint of ['local', 'remote']) {
+      assert.equal(fields[endpoint].properties.ip.type, 'ip');
+      assert.equal(fields[endpoint].properties.port.type, 'integer');
+    }
+    assert.equal(fields.local.properties.user.properties.id.type, 'keyword');
+    for (const role of ['client', 'server']) {
+      assert.equal(fields.dns.properties[role].properties.ip.type, 'ip');
+      assert.equal(fields.dns.properties[role].properties.port.type, 'integer');
+    }
+    assert.equal(fields.source, undefined);
+    assert.equal(fields.destination, undefined);
+  }
   for (const process of [newProcess, existingProcess]) {
     for (const fields of [process, process.parent.properties]) {
       for (const name of ['command_line', 'args']) {
@@ -275,7 +287,8 @@ test('startup bounds process keywords in the template and telemetry stream', asy
       }
     }
   }
-  assert.deepEqual(Object.keys(existingProcess).sort(), ['args', 'command_line', 'parent']);
+  assert.deepEqual(existingProcess, newProcess);
+  assert.equal(update.body.properties.dns.properties.answers.type, 'nested');
 });
 
 test('registered agent routes exactly match the maintained contract', () => {
@@ -614,6 +627,37 @@ test('detection mode does not degrade an Agent for intentionally disabled execut
   }
 });
 
+test('process, network and DNS intake omits severity and preserves host endpoints', async () => {
+  const f = fixture();
+  await f.seed();
+  for (const module of ['telemetry.process', 'telemetry.network', 'telemetry.dns']) {
+    const details = module === 'telemetry.process' ? { process: { pid: 123 } } : {
+      local: { ip: '2001:db8::1', port: 50000 }, remote: { ip: '2001:db8::2', port: 53 },
+    };
+    const evt = { ...event(module), ...details };
+    const body = { agent_id: 'agent-1', events: [evt] };
+    assert.equal((await f.call(expected[3], { body })).body.indexed, 1);
+    const indexed = f.batches.at(-1)[1];
+    assert.equal(Object.hasOwn(indexed, 'event.severity'), false);
+    for (const [field, value] of Object.entries(details)) assert.deepEqual(indexed[field], value);
+    assert.equal(Object.hasOwn(indexed, 'payload'), false);
+    await assert.rejects(f.call(expected[3], {
+      body: { ...body, events: [{ ...evt, 'event.severity': 0 }] },
+    }), /must omit event.severity/);
+    await assert.rejects(f.call(expected[3], {
+      body: { ...body, events: [{ ...evt, payload: details }] },
+    }), /document root/);
+    await assert.rejects(f.call(expected[3], {
+      body: { ...body, events: [{ ...evt, agent: { id: 'spoofed' } }] },
+    }), /agent.id envelope/);
+  }
+  const alert = event('detection.malware', 'alert');
+  delete alert['event.severity'];
+  await assert.rejects(f.call(expected[4], {
+    body: { agent_id: 'agent-1', events: [alert] },
+  }), /event.severity is required/);
+});
+
 // Each intake route must authenticate, normalize the owner, reject wrong topics, and report bulk errors.
 for (const [topic, module, kind] of [
   ['telemetry', 'telemetry.process', 'event'],
@@ -639,11 +683,11 @@ for (const [topic, module, kind] of [
     f.context.core.opensearch.client.asInternalUser.bulk = async () => ({
       body: { errors: true, items: [{ index: { status: 400, error: {
         type: 'mapper_parsing_exception',
-        reason: "failed to parse field [payload.process.args] of type [keyword]. Preview of field's value: 'secret-input'",
+        reason: "failed to parse field [process.args] of type [keyword]. Preview of field's value: 'secret-input'",
       } } }] },
     });
     assert.equal((await f.call(route, { body })).status, 502);
-    assert.match(f.errors[0], /400.*payload.process.args.*mapper_parsing_exception/);
+    assert.match(f.errors[0], /400.*process.args.*mapper_parsing_exception/);
     assert.doesNotMatch(f.errors[0], /secret-input/);
     await f.repo.delete(TOKEN, 'token-1');
     assert.equal((await f.call(route, { body })).status, 401);
@@ -683,7 +727,7 @@ test('stream provisioning targets stream names and preserves configured retentio
     ism_template: [],
   };
   for (const [topic, install] of [['telemetry', installTelemetryIsmPolicy], ['security', installSecurityIsmPolicy], ['logs', installAgentLogsIsmPolicy]]) {
-    const calls = []; let template;
+    const calls = []; let template; let mapping;
     const original = { ...configured, ism_template: [] };
     await install({
       transport: { request: async (request) => {
@@ -691,13 +735,22 @@ test('stream provisioning targets stream names and preserves configured retentio
         if (request.method === 'GET') return { body: { policy: original, _seq_no: 7, _primary_term: 2 } };
         return {};
       } },
-      indices: { putIndexTemplate: async (request) => { template = request.body; }, putMapping: async () => {} },
+      indices: {
+        putIndexTemplate: async (request) => { template = request.body; },
+        putMapping: async (request) => { mapping = request; },
+      },
     }, { info() {}, debug() {}, warn: (message) => assert.fail(message) });
     const policy = calls.find((request) => request.body?.policy).body.policy;
     assert.equal(policy.default_state, 'rollover');
     assert.deepEqual(policy.ism_template[0].index_patterns, [`xdr-agent-${topic}`]);
     assert.deepEqual(policy.states, configured.states);
     assert.deepEqual(template.data_stream, {});
+    assert.equal(mapping.index, `xdr-agent-${topic}`);
+    assert.deepEqual(mapping.body, template.template.mappings);
+    assert.equal(template.template.mappings.properties.payload, undefined);
+    if (topic === 'telemetry') assert.equal(template.template.mappings.properties.process.properties.pid.type, 'integer');
+    if (topic === 'security') assert.equal(template.template.mappings.properties.rule.properties.name.type, 'keyword');
+    if (topic === 'logs') assert.equal(template.template.mappings.properties.message.type, 'text');
     assert.deepEqual(template.index_patterns, [`xdr-agent-${topic}`]);
     assert.ok(calls.some((request) => request.path === `/_data_stream/xdr-agent-${topic}`));
     assert.ok(calls.every((request) => !request.path.includes('homelab')));
