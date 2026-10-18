@@ -160,7 +160,6 @@ const identity = {
 };
 // A minimal intake event tests routing and indexing, not collector-specific payloads.
 const event = (module, kind = 'event') => ({
-  _id: 'agent-1:event-1',
   '@timestamp': new Date().toISOString(),
   'event.type': module === 'agent.logger' ? 'agent.log' : 'fixture',
   'event.module': module,
@@ -652,9 +651,11 @@ test('process, network and DNS intake omits severity and preserves host endpoint
     await assert.rejects(f.call(expected[3], {
       body: { ...body, events: [{ ...evt, agent: { id: 'spoofed' } }] },
     }), /agent.id envelope/);
-    await assert.rejects(f.call(expected[3], {
-      body: { ...body, events: [{ ...evt, id: 'extra-id' }] },
-    }), /_id metadata/);
+    for (const field of ['id', '_id', 'source.event.id']) {
+      await assert.rejects(f.call(expected[3], {
+        body: { ...body, events: [{ ...evt, [field]: 'extra-id' }] },
+      }), /IDs must not be shipped/);
+    }
   }
   const alert = event('detection.malware', 'alert');
   delete alert['event.severity'];
@@ -678,14 +679,10 @@ for (const [topic, module, kind] of [
     assert.equal((await f.call(route, { body })).body.indexed, 1);
     assert.equal(f.batches[0][1]['agent.id'], 'agent-1');
     assert.deepEqual(f.batches[0][0].create, {
-      _id: 'agent-1:event-1', _index: `xdr-agent-${topic}`,
+      _index: `xdr-agent-${topic}`,
     });
     assert.equal(Object.hasOwn(f.batches[0][1], 'id'), false);
     assert.equal(Object.hasOwn(f.batches[0][1], '_id'), false);
-    for (const _id of ['other-agent:event-1', 'agent-1:']) {
-      assert.equal((await f.call(route, { body: { ...body, events: [{ ...body.events[0], _id }] } })).status, 400);
-    }
-    assert.equal(f.batches.length, 1, 'invalid event identities must not reach OpenSearch');
     const wrong = event(
       topic === 'security' ? 'telemetry.process' : 'detection.malware',
       topic === 'security' ? 'event' : 'alert'
@@ -705,14 +702,14 @@ for (const [topic, module, kind] of [
   });
 }
 
-test('create conflicts are acknowledged as retries; other 409s are rejected', async () => {
+test('bulk create conflicts and other item errors are reported as delivery failures', async () => {
   const f = fixture(); await f.seed();
   const body = { agent_id: 'agent-1', events: [event('telemetry.process')] };
   let type = 'version_conflict_engine_exception';
   f.context.core.opensearch.client.asInternalUser.bulk = async () => ({ body: {
     errors: true, items: [{ create: { status: 409, error: { type } } }],
   } });
-  assert.equal((await f.call(expected[3], { body })).status, 200);
+  assert.equal((await f.call(expected[3], { body })).status, 502);
   type = 'security_exception';
   assert.equal((await f.call(expected[3], { body })).status, 502);
 });

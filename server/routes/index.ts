@@ -1031,7 +1031,6 @@ export function defineRoutes(
     event['event.type'] === 'agent.log' || event['event.module'] === 'agent.logger';
 
   const telemetryEventSchema = schema.object({
-    _id: schema.string({ minLength: 1, maxLength: 512 }),
     '@timestamp': schema.string(),
     'event.type': schema.string(),
     'event.category': schema.string(),
@@ -1047,7 +1046,7 @@ export function defineRoutes(
   }, {
     unknowns: 'allow',
     validate: (event) => {
-      if ('id' in event) return 'Event identity must use _id metadata';
+      if (['id', '_id', 'source.event.id'].some((field) => field in event)) return 'Event IDs must not be shipped';
       if ('payload' in event) return 'Event detail fields must be at the document root';
       if ('agent' in event) return 'Agent identity must use the agent.id envelope field';
       const unscored = ['telemetry.process', 'telemetry.network', 'telemetry.dns'].includes(event['event.module']);
@@ -1074,8 +1073,8 @@ export function defineRoutes(
       const bulkBody: Array<Record<string, unknown>> = [];
 
       for (let i = start; i < end; i++) {
-        const { _id, ...evt } = events[i];
-        bulkBody.push({ create: { _index: indexName, _id } });
+        const evt = events[i];
+        bulkBody.push({ create: { _index: indexName } });
         bulkBody.push({
           ...evt,
           'agent.id': payload.agent_id,
@@ -1087,8 +1086,7 @@ export function defineRoutes(
       if (bulkResponse.body.errors) {
         const failedItems = bulkResponse.body.items.filter((item: any) => {
           const action = item.index || item.create || item.update || item.delete;
-          return action?.error && !(item.create?.status === 409 &&
-            item.create.error.type === 'version_conflict_engine_exception');
+          return action?.error;
         });
         if (failedItems.length) throw new Error(`Bulk index to [${indexName}]: ${failedItems.length}/${end - start} ${kind} events failed; samples=${summarizeBulkFailures(failedItems)}`);
       }
@@ -1118,10 +1116,6 @@ export function defineRoutes(
           ? response.notFound({ body: { message: auth.message } })
           : response.unauthorized({ body: { message: auth.message } });
       }
-      const idPrefix = `${payload.agent_id}:`;
-      if (payload.events.some((event) => !event._id.startsWith(idPrefix) || event._id.length === idPrefix.length)) {
-        return response.badRequest({ body: { message: 'Event _id must contain the authenticated agent ID and an event ID' } });
-      }
       if (!payload.events.every(topic.accepts)) {
         return response.badRequest({ body: { message: `Events do not belong to ${topic.kind} endpoint` } });
       }
@@ -1136,7 +1130,6 @@ export function defineRoutes(
         return response.ok({ body });
       } catch (err) {
         logger.error(`Failed to index ${topic.kind} events: ${err}`);
-        // Stable IDs deduplicate partial retries within the current backing index.
         return response.customError({ statusCode: 502, body: { message: `Failed to index ${topic.kind} events` } });
       }
     });

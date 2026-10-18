@@ -190,7 +190,6 @@ export interface UpsertPolicyResponse {
 // ── Telemetry ingestion ────────────────────────────────────────────────────
 
 export interface TelemetryEvent {
-  _id: string;
   '@timestamp': string;
   'event.type': string;
   'event.category': string;
