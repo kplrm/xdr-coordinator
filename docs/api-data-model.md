@@ -17,7 +17,7 @@ Operator routes use the normal Dashboards session:
 | DELETE | `/api/xdr_manager/enrollment_tokens/{token}` | Revoke token |
 | GET | `/api/xdr_manager/protections` | Read last reported installed protections |
 | GET | `/api/xdr_manager/version/latest` | Read the verified published Agent release (cached) |
-| POST | `/api/xdr_manager/setup` | Ensure Discover patterns in the caller's selected tenant; reuse manual patterns |
+| POST | `/api/xdr_manager/setup` | Ensure Discover patterns and refresh cached fields in the caller's selected tenant; reuse manual patterns |
 
 Policies contain `id`, `name`, `description`, optional `config`, and optional `configRevision`, persisted as `xdr-agent-policy`. `config` uses the settings defined by the [managed configuration contract](../../xdr-agent/docs/api-endpoints.md#managed-configuration). Omitting it on update preserves existing settings; `{}` clears prior overrides. Configuration changes generate an opaque revision; metadata-only edits preserve it. The editable built-in `default-endpoint` policy cannot be deleted. Policies referenced by agents or tokens cannot be deleted.
 

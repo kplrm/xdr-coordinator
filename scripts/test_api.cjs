@@ -795,22 +795,82 @@ test('startup installs Discover views for all streams and upgrades existing mana
 });
 
 test('tenant setup reuses manual views and surfaces failures so a later visit can retry', async () => {
+  let fail = true;
+  let failUpdate = true;
+  const updated = new Set();
   const repo = {
     find: async () => {
       if (fail) throw new Error('temporary storage error');
       return { saved_objects: ['telemetry', 'logs', 'security'].map((topic) => ({
-        id: `manual-${topic}`, attributes: { title: `xdr-agent-${topic}`, fields: '["customized"]' },
+        id: `manual-${topic}`, attributes: { title: `xdr-agent-${topic}`, fields: '[]' },
       })) };
+    },
+    update: async (_, id) => {
+      if (failUpdate) throw new Error('temporary update error');
+      updated.add(id);
     },
     bulkCreate: () => assert.fail('Manual views must not be replaced'),
   };
   const logger = { info() {}, error() {} };
-  let fail = true;
-  await assert.rejects(installEventIndexPatterns(repo, logger, async () => []), /temporary storage error/);
+  const getFields = async () => [{ name: '@timestamp', type: 'date' }];
+  await assert.rejects(installEventIndexPatterns(repo, logger, getFields), /temporary storage error/);
   fail = false;
-  const ids = await installEventIndexPatterns(repo, logger, async () => []);
+  await assert.rejects(installEventIndexPatterns(repo, logger, getFields), /temporary update error/);
+  failUpdate = false;
+  const ids = await installEventIndexPatterns(repo, logger, getFields);
   assert.equal(ids['xdr-agent-telemetry'], 'manual-telemetry');
   assert.equal(ids['xdr-agent-security'], 'manual-security');
+  assert.equal(updated.size, 3);
+});
+
+test('setup refreshes stale Discover fields without replacing operator settings or rewriting current caches', async () => {
+  const scripted = { name: 'investigation_label', type: 'string', scripted: true, lang: 'painless', script: "return 'review';" };
+  const original = {
+    title: 'xdr-agent-telemetry', timeFieldName: 'indexed_at',
+    fieldFormatMap: '{"network.inode":{"id":"number"}}',
+    fields: JSON.stringify([
+      { name: 'local.ip', type: 'unknown', searchable: false, count: 4 },
+      { name: 'unmapped_field', type: 'unknown' },
+      scripted,
+    ]),
+  };
+  const objects = ['telemetry', 'logs', 'security'].map((topic) => ({
+    id: `manual-${topic}`, version: 'one', references: [{ id: 'operator-reference' }],
+    attributes: { ...original, title: `xdr-agent-${topic}` },
+  }));
+  const updates = [];
+  const repo = {
+    find: async () => ({ saved_objects: structuredClone(objects) }),
+    update: async (type, id, attributes, options) => {
+      assert.equal(type, 'index-pattern');
+      assert.deepEqual(Object.keys(attributes), ['fields']);
+      const object = objects.find((item) => item.id === id);
+      assert.equal(options.version, object.version);
+      Object.assign(object.attributes, attributes);
+      object.version = 'two';
+      updates.push(id);
+    },
+    bulkCreate: () => assert.fail('Existing views must retain their IDs and settings'),
+  };
+  const mapped = [
+    { name: '@timestamp', type: 'date', searchable: true, aggregatable: true },
+    { name: 'local.ip', type: 'ip', searchable: true, aggregatable: true },
+    { name: 'network.state', type: 'string', searchable: true, aggregatable: true },
+    { name: 'remote.port', type: 'number', searchable: true, aggregatable: true },
+  ];
+  const logger = { info() {}, error: assert.fail };
+  const ids = await installEventIndexPatterns(repo, logger, async () => mapped);
+  assert.equal(ids['xdr-agent-telemetry'], 'manual-telemetry');
+  assert.equal(updates.length, 3);
+  for (const object of objects) {
+    assert.deepEqual(object.attributes, {
+      ...original, title: object.attributes.title,
+      fields: JSON.stringify([mapped[0], { ...mapped[1], count: 4 }, ...mapped.slice(2), scripted]),
+    });
+    assert.deepEqual(object.references, [{ id: 'operator-reference' }]);
+  }
+  await installEventIndexPatterns(repo, logger, async () => mapped);
+  assert.equal(updates.length, 3, 'unchanged field lists must not cause saved-object writes');
 });
 
 test('browser startup prepares the selected tenant before Discover and preserves an existing default', async () => {

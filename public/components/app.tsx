@@ -605,11 +605,12 @@ export const XdrManagerApp = ({ basename, notifications, http }: XdrManagerAppDe
     {
       field: 'version',
       name: i18n.translate('xdrCoordinator.column.version', { defaultMessage: 'Version' }),
+      width: '220px',
       render: (version: string) => {
         const hasUpgrade = isNewerVersion(latestVersion, version);
         return (
-          <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false}>
-            <EuiFlexItem grow={false}>{version}</EuiFlexItem>
+          <EuiFlexGroup gutterSize="xs" alignItems="center" responsive={false} wrap>
+            <EuiFlexItem grow={false} style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>{version}</EuiFlexItem>
             {hasUpgrade && (
               <EuiFlexItem grow={false}>
                 <EuiBadge color="warning">

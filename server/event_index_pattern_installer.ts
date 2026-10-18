@@ -12,6 +12,8 @@ type IndexPatternObject = {
   references: [];
 };
 
+type CachedField = { name: string; scripted?: boolean; count?: number };
+
 function buildIndexPatterns(): IndexPatternObject[] {
   return [
     { id: 'xdr-agent-telemetry', title: EVENT_STREAMS.telemetry },
@@ -27,7 +29,7 @@ function buildIndexPatterns(): IndexPatternObject[] {
 export async function installEventIndexPatterns(
   repo: ISavedObjectsRepository,
   logger: Logger,
-  getFields: (pattern: string) => Promise<unknown[]>
+  getFields: (pattern: string) => Promise<CachedField[]>
 ): Promise<Record<string, string>> {
   try {
     // Saved objects are tenant-scoped. Reuse manually created views by title
@@ -44,15 +46,28 @@ export async function installEventIndexPatterns(
       }
     }
     const ids: Record<string, string> = {};
-    const patterns = buildIndexPatterns().filter((pattern) => {
+    const patterns: IndexPatternObject[] = [];
+    // Discover's saved field cache is separate from the stream mappings.
+    // Refresh it on setup, preserving scripted fields and operator settings.
+    await Promise.all(buildIndexPatterns().map(async (pattern) => {
       const found = existing.saved_objects.find((item) => item.attributes.title === pattern.attributes.title);
       ids[pattern.attributes.title] = found?.id ?? pattern.id;
-      return !found || (found.id === pattern.id && (!found.attributes.fields || found.attributes.fields === '[]'));
-    });
-    // Discover loads the saved field list; an empty list breaks its time field
-    // and field picker even when the stream's mappings already exist.
-    await Promise.all(patterns.map(async (pattern) => {
-      pattern.attributes.fields = JSON.stringify(await getFields(pattern.attributes.title));
+      const mapped = await getFields(pattern.attributes.title);
+      const cached: CachedField[] = JSON.parse(found?.attributes.fields || '[]');
+      const counts = new Map(cached.map((field) => [field.name, field.count]));
+      const fields = JSON.stringify([
+        ...mapped.map((field) => counts.get(field.name) === undefined
+          ? field : { ...field, count: counts.get(field.name) }),
+        ...cached.filter((field) => field.scripted),
+      ]);
+      if (found) {
+        if (fields !== found.attributes.fields) {
+          await repo.update('index-pattern', found.id, { fields }, { version: found.version });
+        }
+      } else {
+        pattern.attributes.fields = fields;
+        patterns.push(pattern);
+      }
     }));
     const result = patterns.length
       ? await repo.bulkCreate(patterns as any[], { overwrite: true })
