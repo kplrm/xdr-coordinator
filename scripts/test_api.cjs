@@ -160,7 +160,7 @@ const identity = {
 };
 // A minimal intake event tests routing and indexing, not collector-specific payloads.
 const event = (module, kind = 'event') => ({
-  id: 'event-1',
+  _id: 'agent-1:event-1',
   '@timestamp': new Date().toISOString(),
   'event.type': module === 'agent.logger' ? 'agent.log' : 'fixture',
   'event.module': module,
@@ -641,6 +641,8 @@ test('process, network and DNS intake omits severity and preserves host endpoint
     assert.equal(Object.hasOwn(indexed, 'event.severity'), false);
     for (const [field, value] of Object.entries(details)) assert.deepEqual(indexed[field], value);
     assert.equal(Object.hasOwn(indexed, 'payload'), false);
+    assert.equal(Object.hasOwn(indexed, 'id'), false);
+    assert.equal(Object.hasOwn(indexed, '_id'), false);
     await assert.rejects(f.call(expected[3], {
       body: { ...body, events: [{ ...evt, 'event.severity': 0 }] },
     }), /must omit event.severity/);
@@ -650,6 +652,9 @@ test('process, network and DNS intake omits severity and preserves host endpoint
     await assert.rejects(f.call(expected[3], {
       body: { ...body, events: [{ ...evt, agent: { id: 'spoofed' } }] },
     }), /agent.id envelope/);
+    await assert.rejects(f.call(expected[3], {
+      body: { ...body, events: [{ ...evt, id: 'extra-id' }] },
+    }), /_id metadata/);
   }
   const alert = event('detection.malware', 'alert');
   delete alert['event.severity'];
@@ -675,6 +680,12 @@ for (const [topic, module, kind] of [
     assert.deepEqual(f.batches[0][0].create, {
       _id: 'agent-1:event-1', _index: `xdr-agent-${topic}`,
     });
+    assert.equal(Object.hasOwn(f.batches[0][1], 'id'), false);
+    assert.equal(Object.hasOwn(f.batches[0][1], '_id'), false);
+    for (const _id of ['other-agent:event-1', 'agent-1:']) {
+      assert.equal((await f.call(route, { body: { ...body, events: [{ ...body.events[0], _id }] } })).status, 400);
+    }
+    assert.equal(f.batches.length, 1, 'invalid event identities must not reach OpenSearch');
     const wrong = event(
       topic === 'security' ? 'telemetry.process' : 'detection.malware',
       topic === 'security' ? 'event' : 'alert'
@@ -748,6 +759,8 @@ test('stream provisioning targets stream names and preserves configured retentio
     assert.equal(mapping.index, `xdr-agent-${topic}`);
     assert.deepEqual(mapping.body, template.template.mappings);
     assert.equal(template.template.mappings.properties.payload, undefined);
+    assert.equal(template.template.mappings.properties.id, undefined);
+    assert.equal(template.template.mappings.properties._id, undefined);
     if (topic === 'telemetry') assert.equal(template.template.mappings.properties.process.properties.pid.type, 'integer');
     if (topic === 'security') assert.equal(template.template.mappings.properties.rule.properties.name.type, 'keyword');
     if (topic === 'logs') assert.equal(template.template.mappings.properties.message.type, 'text');

@@ -24,7 +24,6 @@ function buildIndexTemplate() {
           },
         ],
         properties: {
-          id: { type: 'keyword' },
           '@timestamp': { type: 'date' },
           'event.type': { type: 'keyword' },
           'event.category': { type: 'keyword' },
