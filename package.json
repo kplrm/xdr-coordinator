@@ -3,7 +3,7 @@
   "version": "0.4.2",
   "description": "OpenSearch Dashboards plugin for XDR Coordinator",
   "main": "index.js",
-  "license": "Non-commercial. Provided for legal review purposes only. Subject to change.",
+  "license": "AGPL-3.0",
   "private": true,
   "scripts": {
     "build": "bash ./scripts/build_external.sh",

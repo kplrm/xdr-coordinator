@@ -14,3 +14,13 @@ npm run build -- --opensearch-dashboards-version 3.9.0
 ```
 
 Builds use a disposable Dashboards copy and leave the upstream checkout untouched. Set `OSD_ROOT` to select another build checkout.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development, validation, and reporting guidelines.
+
+## License
+
+Copyright (C) 2026 Diego A. Guillen-Rosaperez
+
+Licensed under the [GNU Affero General Public License, version 3 only](LICENSE) (`AGPL-3.0`). Third-party components retain their own licenses and notices.
