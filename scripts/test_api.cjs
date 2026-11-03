@@ -165,7 +165,7 @@ const event = (module, kind = 'event') => ({
   'event.module': module,
   'event.kind': kind,
   'event.category': 'process',
-  ...(['telemetry.process', 'telemetry.network', 'telemetry.dns'].includes(module) ? {} : { 'event.severity': 0 }),
+  ...(['telemetry.process', 'telemetry.network', 'telemetry.dns', 'telemetry.authentication'].includes(module) ? {} : { 'event.severity': 0 }),
   'agent.id': 'spoofed',
   'host.hostname': 'host',
 });
@@ -275,7 +275,16 @@ test('startup maps host endpoints and bounds process keywords in the telemetry s
       assert.equal(fields.dns.properties[role].properties.ip.type, 'ip');
       assert.equal(fields.dns.properties[role].properties.port.type, 'integer');
     }
-    assert.equal(fields.source, undefined);
+    assert.equal(fields.source.properties.ip.type, 'ip');
+    assert.equal(fields.source.properties.port.type, 'integer');
+    assert.equal(fields.user.properties.id.type, 'keyword');
+    assert.equal(fields.user.properties.effective.properties.name.type, 'keyword');
+    assert.equal(fields['event.created'].type, 'date');
+    assert.equal(fields['event.original'].index, false);
+    const auth = fields.xdr.properties.authentication.properties;
+    assert.equal(auth.method.type, 'keyword');
+    assert.equal(auth.key.properties.fingerprint.type, 'keyword');
+    assert.equal(auth.invalid_user.type, 'boolean');
     assert.equal(fields.destination, undefined);
   }
   for (const process of [newProcess, existingProcess]) {
@@ -626,11 +635,15 @@ test('detection mode does not degrade an Agent for intentionally disabled execut
   }
 });
 
-test('process, network and DNS intake omits severity and preserves host endpoints', async () => {
+test('unscored telemetry intake preserves endpoint and authentication details', async () => {
   const f = fixture();
   await f.seed();
-  for (const module of ['telemetry.process', 'telemetry.network', 'telemetry.dns']) {
-    const details = module === 'telemetry.process' ? { process: { pid: 123 } } : {
+  for (const module of ['telemetry.process', 'telemetry.network', 'telemetry.dns', 'telemetry.authentication']) {
+    const details = module === 'telemetry.authentication' ? {
+      'event.action': 'authentication-failure', 'event.outcome': 'failure',
+      user: { name: 'alice' }, source: { ip: '192.0.2.1', port: 22 },
+      xdr: { authentication: { method: 'password', invalid_user: true } },
+    } : module === 'telemetry.process' ? { process: { pid: 123 } } : {
       local: { ip: '2001:db8::1', port: 50000 }, remote: { ip: '2001:db8::2', port: 53 },
     };
     const evt = { ...event(module), ...details };

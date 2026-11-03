@@ -1049,7 +1049,7 @@ export function defineRoutes(
       if (['id', '_id', 'source.event.id'].some((field) => field in event)) return 'Event IDs must not be shipped';
       if ('payload' in event) return 'Event detail fields must be at the document root';
       if ('agent' in event) return 'Agent identity must use the agent.id envelope field';
-      const unscored = ['telemetry.process', 'telemetry.network', 'telemetry.dns'].includes(event['event.module']);
+      const unscored = ['telemetry.process', 'telemetry.network', 'telemetry.dns', 'telemetry.authentication'].includes(event['event.module']);
       if (unscored && event['event.severity'] !== undefined) return 'This telemetry module must omit event.severity';
       if (!unscored && event['event.severity'] === undefined) return 'event.severity is required for this module';
     },

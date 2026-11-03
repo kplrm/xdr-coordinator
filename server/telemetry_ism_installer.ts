@@ -64,6 +64,21 @@ function buildIndexTemplate() {
           'event.kind': { type: 'keyword' },
           'event.severity': { type: 'integer' }, // File telemetry only.
           'event.module': { type: 'keyword' },
+          'event.dataset': { type: 'keyword' },
+          'event.created': { type: 'date' },
+          'event.reason': { type: 'keyword', ignore_above: 1024 },
+          'event.original': { type: 'keyword', index: false, doc_values: false },
+          message: { type: 'text' },
+          log: { properties: { file: { properties: { path: { type: 'keyword' } } } } },
+          service: { properties: { name: { type: 'keyword' } } },
+          source: {
+            properties: {
+              address: { type: 'keyword' },
+              ip: { type: 'ip' },
+              port: { type: 'integer' },
+              user: { properties: { id: { type: 'keyword' }, name: { type: 'keyword' } } },
+            },
+          },
           'agent.id': { type: 'keyword' },
           'host.hostname': { type: 'keyword' },
           tags: { type: 'keyword' },
@@ -387,15 +402,16 @@ function buildIndexTemplate() {
               },
             },
           },
-          // ── ECS user / session fields (session & authentication events) ──
-          // Emitted by SessionCollector (internal/telemetry/session/monitor.go).
+          // ── ECS user / session fields (authentication logs) ──
           // Note: this `user` sub-object is distinct from the
           //       `process.user` field already mapped above.
           user: {
             properties: {
+              id: { type: 'keyword' },
               name: { type: 'keyword' },
               effective: {
                 properties: {
+                  id: { type: 'keyword' },
                   name: { type: 'keyword' },
                 },
               },
@@ -440,6 +456,21 @@ function buildIndexTemplate() {
           // Fields that have no ECS home live under xdr.*
           xdr: {
             properties: {
+              authentication: {
+                properties: {
+                  method: { type: 'keyword' },
+                  invalid_user: { type: 'boolean' },
+                  ssh_version: { type: 'keyword' },
+                  key: { properties: { algorithm: { type: 'keyword' }, fingerprint: { type: 'keyword' } } },
+                  pam: { properties: { module: { type: 'keyword' }, type: { type: 'keyword' } } },
+                  session: { properties: { id: { type: 'keyword' }, class: { type: 'keyword' }, type: { type: 'keyword' } } },
+                  logname: { type: 'keyword' },
+                  uid: { type: 'keyword' },
+                  euid: { type: 'keyword' },
+                  ruser: { type: 'keyword' },
+                  environment: { type: 'keyword', index: false, doc_values: false },
+                },
+              },
               // Kernel module detail (internal/telemetry/kernel/modules.go)
               kernel_module: {
                 properties: {
